@@ -1,0 +1,5 @@
+requests>=2.31.0
+pandas>=2.0.0
+yfinance>=0.2.60
+alpaca-py>=0.21.0
+scipy>=1.11.0
