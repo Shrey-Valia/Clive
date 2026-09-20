@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.shrey.shortbot.caffeinate</string>
+
+    <!-- Holds the machine awake across the trading window.
+         -i  prevent idle system sleep (works on battery and AC)
+         -s  prevent system sleep (AC only; harmless on battery)
+         -d  prevent display sleep - keeps the display awake too, which is
+             what actually stops this Mac's 1-minute sleep timer from
+             firing mid-job
+         -t 2100  release after 35 minutes (15:30 -> 16:05), covering the
+             15:40 scan, the 15:45 MOC submit, and the 16:00 close.
+
+         Note this only helps if the Mac is ALREADY awake at 15:30.
+         caffeinate cannot wake a sleeping machine - that needs
+         `sudo pmset repeat wakeorpoweron MTWRF 15:25:00`. The two are
+         complementary: pmset gets it awake, caffeinate keeps it awake. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-dis</string>
+        <string>-t</string>
+        <string>2100</string>
+    </array>
+
+    <!-- 15:30 local (= ET on this machine), five minutes ahead of the
+         shortbot agent's 15:35 start. Weekdays only. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/shreyvalia/Desktop/Shorting bot/output/caffeinate.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/shreyvalia/Desktop/Shorting bot/output/caffeinate.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

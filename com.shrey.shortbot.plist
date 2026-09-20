@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.shrey.shortbot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+        <string>/Users/shreyvalia/Desktop/Shorting bot/daily.py</string>
+        <string>--execute</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/shreyvalia/Desktop/Shorting bot</string>
+
+    <!-- Fires 15:35 local. This machine is on ET, so local == market time.
+         daily.py then waits for 15:40 to scrape and 15:45 to submit
+         market-on-close orders. Alpaca refuses MOC after 15:50, so the whole
+         chain sits well inside that cutoff.
+         Weekdays only; market holidays are caught by Alpaca's calendar
+         check inside daily.py. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>35</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>35</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>35</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>35</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>35</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/shreyvalia/Desktop/Shorting bot/output/shortbot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/shreyvalia/Desktop/Shorting bot/output/shortbot.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
