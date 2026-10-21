@@ -1,0 +1,4 @@
+logs/
+state/
+.cache/
+__pycache__/
