@@ -1,0 +1,10 @@
+{
+  "n_variants_PUT": 64,
+  "n_variants_total": 212,
+  "rc_p": 0.3565,
+  "dsr_sr0_monthly": 0.10231471504363128,
+  "dsr_sr0_ann": 0.3544285696350022,
+  "baseline_SR_ann_full": 0.5634267136861089,
+  "oos_start": "2017-01-01",
+  "is_end": "2016-12-31"
+}
