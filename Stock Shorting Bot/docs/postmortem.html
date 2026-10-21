@@ -1,0 +1,191 @@
+<title>Shortbot Post-Mortem</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,750&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: single reading column, wide tables break out into scroll boxes; a ticker-tape strip anchors the top. */
+:root {
+  --ink: #17202b;
+  --ink-soft: #4b5867;
+  --paper: #f6f8fa;
+  --panel: #e9eef3;
+  --rule: #cfd8e1;
+  --accent: #1f5fa8;
+  --loss: #b4342a;
+  --warn: #9a6a00;
+  --ok: #24744a;
+  --f-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+  --f-body: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ink: #e3e9ef; --ink-soft: #9eacba; --paper: #10161d; --panel: #18212b;
+    --rule: #2a3643; --accent: #7fb2ec; --loss: #f0877d; --warn: #e3b552; --ok: #6fcf98;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ink: #e3e9ef; --ink-soft: #9eacba; --paper: #10161d; --panel: #18212b;
+  --rule: #2a3643; --accent: #7fb2ec; --loss: #f0877d; --warn: #e3b552; --ok: #6fcf98;
+}
+body {
+  background: var(--paper); color: var(--ink);
+  font: 16px/1.6 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 80px;
+}
+main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; line-height: 1.15; margin: 0; }
+h1 { font-size: clamp(2.1rem, 5vw, 3rem); font-weight: 750; letter-spacing: -0.02em; }
+h2 { font-size: 1.55rem; font-weight: 650; }
+h3 { font-size: 1.1rem; font-weight: 600; font-family: var(--f-body); }
+p { margin: 0; max-width: 65ch; }
+section { display: flex; flex-direction: column; gap: 16px; }
+.eyebrow { font: 600 0.75rem/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+.lede { font-size: 1.15rem; color: var(--ink-soft); }
+code, .mono { font-family: var(--f-mono); font-size: 0.88em; }
+code { background: var(--panel); padding: 1px 5px; border-radius: 4px; }
+header { display: flex; flex-direction: column; gap: 14px; }
+
+.tape { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.tape div { background: var(--panel); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+.tape b { font: 600 1.45rem/1.1 var(--f-mono); font-variant-numeric: tabular-nums; }
+.tape span { font-size: 0.8rem; color: var(--ink-soft); }
+.neg { color: var(--loss); }
+
+.scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 600 0.72rem/1.2 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); background: var(--panel); }
+tr:last-child td { border-bottom: 0; }
+td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pill { display: inline-block; font: 600 0.7rem/1 var(--f-mono); letter-spacing: 0.04em; padding: 4px 7px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.loss { color: var(--loss); } .pill.warn { color: var(--warn); } .pill.ok { color: var(--ok); }
+
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; border-left: 2px solid var(--rule); }
+.timeline li { padding: 0 0 22px 20px; position: relative; display: flex; flex-direction: column; gap: 4px; }
+.timeline li::before { content: ""; position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--paper); border: 2px solid var(--accent); }
+.timeline li.bad::before { border-color: var(--loss); }
+.timeline time { font: 600 0.8rem/1.2 var(--f-mono); color: var(--ink-soft); }
+
+.cause { display: grid; grid-template-columns: 2.2rem 1fr; gap: 6px 14px; padding-top: 18px; border-top: 1px solid var(--rule); }
+.cause .n { font: 750 1.6rem/1 var(--f-display); color: var(--accent); }
+.cause > div { display: flex; flex-direction: column; gap: 8px; }
+.evidence { font-size: 0.86rem; color: var(--ink-soft); }
+
+.callout { background: var(--panel); border-radius: 8px; padding: 18px 20px; display: flex; flex-direction: column; gap: 8px; }
+footer { font-size: 0.82rem; color: var(--ink-soft); border-top: 1px solid var(--rule); padding-top: 16px; }
+@media (max-width: 480px) { .cause { grid-template-columns: 1fr; } }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">Post-mortem · Alpaca paper account · Sep 14 – Oct 20, 2026</div>
+    <h1>Shortbot Post-Mortem</h1>
+    <p class="lede">In five weeks the first bot sent three orders, all in one stock, all on its first day, and none of them shorts. After that it never traded again. Below is what happened and why, and what the new Stock Shorting Bot does differently.</p>
+  </header>
+
+  <div class="tape" aria-label="Account summary">
+    <div><b>$10,000.00</b><span>Starting paper equity</span></div>
+    <div><b>$9,997.58</b><span>Equity on Oct 20</span></div>
+    <div><b class="neg">−$2.42</b><span>Total P&amp;L</span></div>
+    <div><b>3</b><span>Orders, ever (2 filled)</span></div>
+    <div><b>0</b><span>Short sales placed</span></div>
+  </div>
+
+  <section>
+    <div class="eyebrow">The whole order book</div>
+    <h2>Every order the account ever placed</h2>
+    <p>Pulled directly from Alpaca's order history. The bot's own journal and logs lived in a git-ignored <code>output/</code> folder that no longer exists, so the broker is the only surviving record.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Time (ET)</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type / TIF</th><th>Fill</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td class="num">Sep 15 15:59:05</td><td class="num">CLNN</td><td>Buy</td><td class="num">121</td><td class="num">market / day</td><td class="num">$4.03</td><td><span class="pill ok">filled</span></td></tr>
+          <tr><td class="num">Sep 15 15:59:14</td><td class="num">CLNN</td><td>Sell</td><td class="num">121</td><td class="num">market / day</td><td class="num">$4.01</td><td><span class="pill ok">filled</span></td></tr>
+          <tr><td class="num">Sep 15 15:59:59</td><td class="num">CLNN</td><td>Buy</td><td class="num">121</td><td class="num">market / day</td><td class="num">—</td><td><span class="pill warn">expired</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The round trip was 121 shares × $0.02 = <strong>−$2.42</strong>, held for nine seconds. The bot's journal booked the same trade as −$0.16, a mistake the old <code>journal.py</code> admits in a comment. The third order went in one second before the bell and expired unfilled.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Timeline</div>
+    <h2>What happened, in order</h2>
+    <ol class="timeline">
+      <li><time>Sep 14</time><span>Paper account opened with $10,000, shorting enabled, 4× margin.</span></li>
+      <li class="bad"><time>Sep 15 · 15:59</time><span>First live run. A long buy in CLNN, an immediate sell, then a re-buy that expired at the close. The README later says closing the laptop lid "killed the first live run".</span></li>
+      <li><time>Sep 20 · 16:51</time><span>All nine commits land within 46 seconds of each other. The history was written after the fact, so git can't show which code actually ran on Sep 15.</span></li>
+      <li class="bad"><time>Sep 21 – Oct 19</time><span>cron fires <code>daily.py --execute</code> at 15:35 ET on weekdays. Alpaca shows <strong>zero orders</strong> for 21 trading days.</span></li>
+      <li class="bad"><time>Oct 20 · 16:15</time><span>The project folder had been renamed from <code>Shorting bot</code> to <code>Clive-Trading Bot</code>. cron mails the error <code>cd: … Shorting bot: No such file or directory</code>. Both cron lines still point at the old path today.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="eyebrow">Root causes, most damaging first</div>
+    <h2>Why it failed</h2>
+
+    <div class="cause"><div class="n">1</div><div>
+      <h3>The trade gate could never open</h3>
+      <p>The automated path only shorts names rated <code>SHORT</code> with <code>HIGH</code> conviction. During scoring, any name without a base-rate sample (<code>exp_n</code>) is stepped down one conviction level. But the base-rate data was attached <em>after</em> scoring, so every row was missing <code>exp_n</code> when it was scored. HIGH always became MEDIUM, the order list was empty every day, and nothing reported it as a failure.</p>
+      <p class="evidence">Evidence: <code>daily.py:74–75</code> calls <code>score_all()</code> and then <code>expectancy.enrich()</code>. <code>scoring.py:258–263</code> does the step-down. <code>daily.py:145</code> filters on <code>conviction == "HIGH"</code>. Alpaca has no orders after Sep 15.</p>
+    </div></div>
+
+    <div class="cause"><div class="n">2</div><div>
+      <h3>Failures were silent</h3>
+      <p>Every run sent its output to a log file inside a git-ignored folder. A day with no trades looked exactly like a day where nothing ran, and nothing outside the laptop checked either one. Then the folder was renamed. When the project files were deleted, the journal and logs went with them.</p>
+      <p class="evidence">Evidence: the crontab redirects to <code>output/shortbot.log</code>; <code>.gitignore</code> excludes <code>output/</code>; there is one cron error mail, from Oct 20.</p>
+    </div></div>
+
+    <div class="cause"><div class="n">3</div><div>
+      <h3>The laptop was an unreliable host</h3>
+      <p>launchd calendar triggers never fired on this Mac (<code>runs = 0</code>). cron needed Full Disk Access because the project sits on the Desktop. The Mac is set to <code>sleep 1</code>, and a closed lid puts it to sleep no matter what wake schedule is set. Any run during that window simply didn't happen.</p>
+      <p class="evidence">Evidence: the old README's "Why cron and not launchd" and "Staying awake" sections; <code>pmset -g</code> still shows <code>sleep 1</code> today.</p>
+    </div></div>
+
+    <div class="cause"><div class="n">4</div><div>
+      <h3>Day-one order mechanics</h3>
+      <p>Market orders went in at 15:59, inside the closing scramble, and the bot bought, sold and re-bought the same name in 54 seconds. That matches two failure modes the README describes later: a "run twice" flatten that sells what was just bought, and a late market order that misses the bell.</p>
+      <p class="evidence">Evidence: the three CLNN orders above; the README sections "Why market-on-close" and "Running it twice".</p>
+    </div></div>
+
+    <div class="cause"><div class="n">5</div><div>
+      <h3>The strategy's own backtest found no edge</h3>
+      <p>Even with perfect execution, shorting the spikes lost money on average. Over 2,410 spike events across 600 small caps, close to close, shorts averaged −0.81% despite winning 52% of the time. 11.2% of shorts lost more than 10%, and the worst 1% lost about 40%. The README's own conclusion: "These weights rank fit; they do not forecast."</p>
+    </div></div>
+
+    <div class="cause"><div class="n">6</div><div>
+      <h3>Data gaps and scope drift</h3>
+      <p>There was no borrow-fee data, short interest was 1–3 weeks old, there was no news or catalyst check, and many small caps can't be shorted on Alpaca. The project also drifted: it started as a long-and-short "squeeze scanner", and its README says in one place that it doesn't place trades and in another that it trades automatically.</p>
+    </div></div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Changes in the new bot</div>
+    <h2>What the Stock Shorting Bot does differently</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Failure</th><th>New approach</th></tr></thead>
+        <tbody>
+          <tr><td>Gate never opened</td><td>No conviction tiers. Every day it ranks 20 names and shorts the top 5 that pass the hard filters. A dry run prints the exact orders, and a run that ends with no orders is logged as an error.</td></tr>
+          <tr><td>Silent failures</td><td>Every run, candidate, order and fill is written to Supabase. A heartbeat shows on the dashboard, and a missed day shows up as a red, stale card.</td></tr>
+          <tr><td>Lost history</td><td>Trades are rebuilt from Alpaca fills into the database, not into local CSV files.</td></tr>
+          <tr><td>Unreliable host</td><td>The stale cron lines are replaced with absolute paths to the new folder, plus a setup guide for waking the Mac. The dashboard heartbeat exposes any missed run the next day.</td></tr>
+          <tr><td>Day-one order mechanics</td><td>Orders go in at 15:55, not 15:59. Positions held over are netted, never flatten-then-rebuy. A once-per-day guard blocks double runs, and order status is checked after submission.</td></tr>
+          <tr><td>No catalyst check</td><td>Headlines from FMP or Yahoo are classified: real de-risking news is excluded, hype is rewarded. On its first dry run, using Oct 20 data, this removed the two names the score alone ranked #1 and #2: MYGN, up on a $210M asset sale to Labcorp, and BRZE, up 52% on a $5.66B Salesforce buyout.</td></tr>
+          <tr><td>Hard-to-borrow names</td><td>Alpaca's <code>shortable</code> and <code>easy_to_borrow</code> flags are a hard filter. The bot walks down the ranking until it has 5 names.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <h3>What this does not fix</h3>
+      <p>The new rules are a different strategy from the one backtested, and they are untested. They hold 85% gross short exposure overnight with no stop. Spike shorts have fat-tailed losses: in the old backtest, one trade in nine lost more than 10%. It runs on paper only, and the dashboard will show within a few weeks whether it has an edge.</p>
+    </div>
+  </section>
+
+  <footer>Sources: Alpaca paper order history and account endpoint (read Oct 20, 2026); git commits <span class="mono">c536ffb…1495bd6</span>; the user crontab; cron mail; <span class="mono">pmset -g</span>.</footer>
+</main>
