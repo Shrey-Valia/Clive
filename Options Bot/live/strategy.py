@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 from . import config as C
 
@@ -27,6 +27,7 @@ class OptionQuote:
     ask: float
     delta: float | None         # signed (puts negative)
     iv: float | None = None
+    ts: datetime | None = None  # quote time (tz-aware), when the feed gives one
 
     @property
     def mid(self) -> float:
@@ -34,7 +35,18 @@ class OptionQuote:
 
     @property
     def valid(self) -> bool:
+        """Two-sided market (needed to open)."""
         return self.bid > 0 and self.ask > 0 and self.ask >= self.bid
+
+    @property
+    def quoted(self) -> bool:
+        """Has an offer; the bid may be 0 (a far OTM leg we are selling back)."""
+        return self.ask > 0 and self.bid >= 0 and self.ask >= self.bid
+
+    def age_seconds(self, now: datetime) -> float | None:
+        if self.ts is None:
+            return None
+        return (now - self.ts).total_seconds()
 
     @property
     def spread_frac(self) -> float:
@@ -142,8 +154,12 @@ def entry_signal(sig: Signal) -> Signal:
     return sig
 
 
-def kill_switch(vix: float | None, vix3m: float | None) -> tuple[bool, str]:
-    """(blocked, reason). Fails closed on missing data when configured."""
+def kill_switch(vix: float | None, vix3m: float | None, fresh: bool = True,
+                stale_reason: str = "") -> tuple[bool, str]:
+    """(blocked, reason). Fails closed on missing data when configured, and
+    always on stale / mixed-source quotes (``fresh=False``)."""
+    if not fresh and vix is not None and vix3m is not None:
+        return True, f"VIX/VIX3M not fresh: {stale_reason or 'stale or mixed sources'} (fail closed)"
     if vix is None or not math.isfinite(vix) or vix3m is None or not math.isfinite(vix3m) or vix3m <= 0:
         if C.KILL_ON_MISSING_VIX:
             return True, "VIX/VIX3M unavailable (fail closed)"
@@ -158,8 +174,10 @@ def kill_switch(vix: float | None, vix3m: float | None) -> tuple[bool, str]:
 
 # ---------------------------------------------------------------- strikes
 def is_monthly(d: date) -> bool:
-    """Third Friday of the month (standard monthly expiry)."""
-    return d.weekday() == 4 and 15 <= d.day <= 21
+    """Third Friday of the month, or the Thursday before it (when that Friday is
+    a holiday, e.g. Good Friday or Juneteenth). Same rule as the backtest engine
+    (optionsbot.engine.Market.is_monthly)."""
+    return (d.weekday() == 4 and 15 <= d.day <= 21) or (d.weekday() == 3 and 14 <= d.day <= 20)
 
 
 def rank_expiries(expiries, today: date, dte_min=C.DTE_MIN, dte_max=C.DTE_MAX,
@@ -213,10 +231,20 @@ def pick_spread(chain: list[OptionQuote], underlying: str, today: date) -> tuple
     return None, why
 
 
-def check_pick(p: Pick) -> str | None:
-    """Quote sanity and the credit/width guard. Returns a skip reason or None."""
+def check_pick(p: Pick, now: datetime | None = None,
+               max_age: float = C.MAX_OPTION_QUOTE_AGE_SECONDS) -> str | None:
+    """Quote sanity and the credit/width guard. Returns a skip reason or None.
+    With ``now``, a leg quote older than ``max_age`` seconds (or without a
+    timestamp) is rejected: fail closed."""
     if p.width < C.MIN_WIDTH:
         return f"width {p.width:g} < {C.MIN_WIDTH:g}"
+    if now is not None:
+        for leg, name in ((p.short, "short"), (p.long, "long")):
+            age = leg.age_seconds(now)
+            if age is None:
+                return f"{name} leg quote has no timestamp (fail closed)"
+            if age > max_age:
+                return f"{name} leg quote is {age / 60:.0f} min old (stale)"
     for leg, name in ((p.short, "short"), (p.long, "long")):
         if not leg.valid:
             return f"{name} leg has no two-sided quote"
@@ -274,8 +302,8 @@ def _ceil_tick(x: float) -> float:
 
 def entry_ladder(p: Pick, steps: int = C.ENTRY_STEPS, max_conc: float = C.ENTRY_MAX_CONCESSION) -> list[float]:
     """Credits to ask for, best first: mid, then walking toward the natural
-    credit by at most ``max_conc`` of the distance. Never below the 15%-of-width
-    floor. Rounded down to the tick."""
+    credit by at most ``max_conc`` of the distance. Never below the credit floor
+    (MIN_CREDIT_FRAC of the width, and MIN_CREDIT_ABS). Rounded down to the tick."""
     floor = max(C.MIN_CREDIT_FRAC * p.width, C.MIN_CREDIT_ABS)
     mid, nat = p.mid_credit, p.natural_credit
     gap = max(mid - nat, 0) * max_conc
@@ -306,20 +334,63 @@ def exit_cutoff_price(natural_debit: float, width: float) -> float:
 
 
 # ---------------------------------------------------------------- exits
+def exit_prices(sq: OptionQuote | None, lq: OptionQuote | None) -> tuple[float | None, float | None, str | None]:
+    """(mid_debit, natural_debit, note) to close a put credit spread: buy back the
+    short leg, sell the long leg. The leg being sold (long) may bid 0, and a
+    missing long quote counts as worth 0. The short leg needs an offer."""
+    if sq is None or not sq.quoted:
+        return None, None, "short leg has no offer"
+    note = None
+    if lq is None or not lq.quoted:
+        lmid, lbid, note = 0.0, 0.0, "long leg unquoted (valued at 0)"
+    else:
+        lmid, lbid = lq.mid, lq.bid
+        if lq.bid <= 0:
+            note = "long leg bids 0"
+    if sq.bid <= 0:
+        note = (note + "; " if note else "") + "short leg bids 0"
+    mid = round(max(sq.mid - lmid, 0.0), 4)
+    natural = round(max(sq.ask - lbid, 0.0), 4)
+    return mid, natural, note
+
+
+def intrinsic_debit(short_k: float, long_k: float, spot: float | None) -> float | None:
+    if spot is None or not math.isfinite(spot):
+        return None
+    return round(max(short_k - spot, 0.0) - max(long_k - spot, 0.0), 4)
+
+
+def blind_exit_prices(short_k: float, long_k: float, spot: float | None) -> tuple[list[float], float]:
+    """Ladder and cutoff price for a forced exit (expiry) with no usable option
+    quotes: start at intrinsic value + $0.05, walk up a quarter of the width, and
+    at the cutoff pay up to half the width over intrinsic, never above the width.
+    Without a spot price the ladder walks from 5% to 50% of the width."""
+    width = round(short_k - long_k, 4)
+    intr = intrinsic_debit(short_k, long_k, spot)
+    lo = (intr if intr is not None else 0.0) + 0.05
+    if intr is None:
+        lo = 0.05 * width
+    hi = min(lo + 0.25 * width, width)
+    lad = exit_ladder(min(lo, width), hi)
+    cut = round(min(_ceil_tick(lo + 0.5 * width), width), 2)
+    return lad, max(cut, lad[-1])
+
+
 def exit_reason(*, entry_credit: float, cost_to_close: float | None, close: float, sma5: float,
                 held_days: int, trading_days_to_expiry: int, end_of_day: bool,
                 stop_mult: float | None = C.STOP_MULT) -> str | None:
     """Why to close now, or None. Order matches the backtest (credit_exit first,
     then time, then 5DMA). Intraday (``end_of_day=False``) only the price-based
     rules (take profit, stop) and the expiry guard fire; time and 5DMA rules
-    use the close and are evaluated at ~15:50."""
+    use the close and are evaluated at the decision time (C.DECIDE_MINUTES_BEFORE_CLOSE).
+    ``entry_credit`` should be the mid credit at entry (research: marks), not the fill."""
     if trading_days_to_expiry <= C.CLOSE_DTE_TRADING_DAYS:
         return "expiry_exit"
     if cost_to_close is not None and entry_credit > 0:
         if cost_to_close <= entry_credit * (1 - C.TAKE_PROFIT):
             return "take_profit"
-        if stop_mult is not None and cost_to_close >= entry_credit * stop_mult:
-            return "stop_loss"
+        if stop_mult is not None and cost_to_close >= entry_credit * (1 + stop_mult):
+            return "stop_loss"                  # research sl_mult semantics
     if not end_of_day:
         return None
     if held_days >= C.MAX_HOLD_DAYS:

@@ -22,13 +22,23 @@ Safety
   Stock Shorting Bot keys (read-only), which are never sent to the trading host.
 * Mutating calls (submit/replace/cancel) raise unless the broker was built
   with execute=True.
+* The account must not be the Stock Shorting Bot's (key and account id are
+  compared, never logged), and the first account seen is pinned in
+  live/state/account_pin.json: a different account later is refused.
+* Only orders whose client_order_id starts with "options-" are ever canceled;
+  there is no DELETE /v2/orders (cancel everything) call.
+* Idempotent calls (GET, DELETE) retry on 429 / 5xx / network errors. Order
+  submissions retry only after a lookup by client_order_id finds nothing.
 * Secrets are never logged; errors include status codes and response text only.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import re
 import time
+import uuid
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -48,6 +58,26 @@ class BrokerError(RuntimeError):
 
 class SafetyError(RuntimeError):
     pass
+
+
+class RetryableError(BrokerError):
+    """429 / 5xx / timeout / connection error: the request may or may not have taken effect."""
+
+
+def client_order_id(*parts) -> str:
+    """'options-<parts>-<uuid>' (Alpaca allows 128 chars). The uuid suffix makes
+    every id unique, even for strikes like 652.5 that used to collide when the
+    id was cut at 48 characters."""
+    body = re.sub(r"[^A-Za-z0-9._:-]", "_", "-".join(str(p) for p in parts if p not in (None, "")))
+    suffix = uuid.uuid4().hex[:16]
+    room = 128 - len(C.ORDER_PREFIX) - len(suffix) - 1
+    if len(body) > room:
+        body = body[:room]
+    return f"{C.ORDER_PREFIX}{body}-{suffix}"
+
+
+def is_bot_order(o: dict) -> bool:
+    return str(o.get("client_order_id") or "").startswith(C.ORDER_PREFIX)
 
 
 def _f(x, default=0.0):
@@ -73,13 +103,16 @@ class Broker:
                 raise
         self.base = env.get("OPT_APCA_BASE_URL", C.PAPER_TRADING_URL).rstrip("/")
         self._account_checked = False
+        self.sleep = time.sleep                 # injectable for tests
+        self.pin_path = C.STATE_DIR / "account_pin.json"
 
     # ------------------------------------------------------------ transport
     @property
     def has_trading(self) -> bool:
         return self.trade_creds is not None
 
-    def _trade(self, method: str, path: str, *, params=None, json=None, mutate=False):
+    def _trade(self, method: str, path: str, *, params=None, json=None, mutate=False, retry=None,
+               none_on_404=False):
         if self.trade_creds is None:
             raise BrokerError(self.trading_error or "no trading credentials")
         if self.trade_creds.source != "options":
@@ -91,10 +124,27 @@ class Broker:
             self.verify_paper_account()
         url = self.base + path
         h = {"APCA-API-KEY-ID": self.trade_creds.key, "APCA-API-SECRET-KEY": self.trade_creds.secret}
-        r = self.session.request(method, url, params=params, json=json, headers=h, timeout=C.REQUEST_TIMEOUT)
-        if r.status_code >= 300:
-            raise BrokerError(f"{method} {path}: HTTP {r.status_code} {r.text[:300]}")
-        return r.json() if r.text else {}
+        retry = method in ("GET", "DELETE") if retry is None else retry
+        tries = C.HTTP_RETRIES if retry else 1
+        last = None
+        for attempt in range(tries):
+            if attempt:
+                self.sleep(min(0.5 * 2 ** attempt, 8))
+            try:
+                r = self.session.request(method, url, params=params, json=json, headers=h,
+                                         timeout=C.REQUEST_TIMEOUT)
+            except requests.RequestException as e:   # message has no headers, so no secrets
+                last = RetryableError(f"{method} {path}: {type(e).__name__}: {str(e)[:150]}")
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                last = RetryableError(f"{method} {path}: HTTP {r.status_code} {r.text[:200]}")
+                continue
+            if none_on_404 and r.status_code == 404:
+                return None
+            if r.status_code >= 300:
+                raise BrokerError(f"{method} {path}: HTTP {r.status_code} {r.text[:300]}")
+            return r.json() if r.text else {}
+        raise last
 
     def _data(self, path: str, params: dict | None = None) -> dict:
         if any(x in path for x in _DATA_FORBIDDEN):
@@ -102,10 +152,15 @@ class Broker:
         url = C.DATA_URL + path
         assert url.startswith("https://data.alpaca.markets/")
         h = {"APCA-API-KEY-ID": self.data_creds.key, "APCA-API-SECRET-KEY": self.data_creds.secret}
-        for attempt in range(4):
-            r = self.session.get(url, params=params, headers=h, timeout=C.REQUEST_TIMEOUT)
+        for attempt in range(C.HTTP_RETRIES):
+            try:
+                r = self.session.get(url, params=params, headers=h, timeout=C.REQUEST_TIMEOUT)
+            except requests.RequestException as e:
+                log.warning("GET %s: %s (retrying)", path, type(e).__name__)
+                self.sleep(1.5 * (attempt + 1))
+                continue
             if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(1.5 * (attempt + 1))
+                self.sleep(1.5 * (attempt + 1))
                 continue
             if r.status_code >= 300:
                 raise BrokerError(f"GET {path}: HTTP {r.status_code} {r.text[:200]}")
@@ -118,8 +173,29 @@ class Broker:
         num = str(a.get("account_number", ""))
         if not num.startswith("PA"):
             raise SafetyError(f"account number does not look like a paper account (prefix {num[:2]!r}); refusing")
+        try:
+            C.assert_not_shorting_account(a)
+        except C.ConfigError as e:
+            raise SafetyError(str(e)) from None
+        self._check_pin(a)
         self._account_checked = True
         return a
+
+    def _check_pin(self, a: dict) -> None:
+        """The first options account seen (in execute mode) is pinned; any other is refused."""
+        aid = str(a.get("id") or a.get("account_number") or "")
+        if not aid:
+            return
+        try:
+            pinned = json.loads(self.pin_path.read_text()).get("id") if self.pin_path.exists() else None
+        except (OSError, ValueError):
+            pinned = None
+        if pinned and pinned != aid:
+            raise SafetyError(f"the OPT keys now point at a different account than the pinned one "
+                              f"({self.pin_path}); delete that file only if the change is intended")
+        if not pinned and self.execute:
+            self.pin_path.parent.mkdir(parents=True, exist_ok=True)
+            self.pin_path.write_text(json.dumps({"id": aid}))
 
     def account(self) -> dict:
         """Equity etc. In a dry run without an options account, a simulated
@@ -162,49 +238,103 @@ class Broker:
         return self._trade("GET", "/v2/calendar", params={"start": start.isoformat(), "end": end.isoformat()})
 
     # ------------------------------------------------------------ orders (trading host, mutating)
+    def _post_order(self, body: dict) -> dict:
+        """POST /v2/orders. After a 429 / 5xx / timeout the order may exist: look it
+        up by client_order_id first and only resubmit when it is not there."""
+        cid = body["client_order_id"]
+        last = None
+        for attempt in range(C.HTTP_RETRIES):
+            if attempt:
+                self.sleep(min(0.5 * 2 ** attempt, 8))
+            try:
+                return self._trade("POST", "/v2/orders", json=body, mutate=True, retry=False)
+            except RetryableError as e:
+                last = e
+                log.warning("order %s: %s; looking it up before any retry", cid, e)
+            try:
+                found = self.get_order_by_client_id(cid)
+            except BrokerError as e:
+                log.error("order %s: lookup failed after a failed submit: %s", cid, e)
+                raise last from None
+            if found:
+                return found
+        raise last
+
     def submit_mleg(self, legs: list[dict], qty: int, limit_price: float, client_order_id: str) -> dict:
         body = {"order_class": "mleg", "qty": str(int(qty)), "type": "limit",
                 "limit_price": f"{limit_price:.2f}", "time_in_force": "day",
-                "client_order_id": client_order_id[:48],
+                "client_order_id": client_order_id[:128],
                 "legs": [{"symbol": l["symbol"], "ratio_qty": str(l.get("ratio_qty", 1)),
                           "side": l["side"], "position_intent": l["position_intent"]} for l in legs]}
         log.info("submit mleg qty=%s limit=%.2f %s", qty, limit_price,
                  " ".join(f"{l['position_intent']}:{l['symbol']}" for l in legs))
-        return self._trade("POST", "/v2/orders", json=body, mutate=True)
+        return self._post_order(body)
 
     def submit_single(self, symbol: str, qty: int, side: str, intent: str, limit_price: float,
                       client_order_id: str) -> dict:
         """Single-leg limit order (emergency close of an unpaired leg only)."""
         body = {"symbol": symbol, "qty": str(int(qty)), "side": side, "type": "limit",
                 "limit_price": f"{abs(limit_price):.2f}", "time_in_force": "day",
-                "position_intent": intent, "client_order_id": client_order_id[:48]}
+                "position_intent": intent, "client_order_id": client_order_id[:128]}
         log.info("submit single %s %s x%s limit=%.2f", intent, symbol, qty, limit_price)
-        return self._trade("POST", "/v2/orders", json=body, mutate=True)
+        return self._post_order(body)
+
+    def submit_stock(self, symbol: str, qty: int, side: str, client_order_id: str) -> dict:
+        """Market order to flatten stock left by an assignment or exercise."""
+        body = {"symbol": symbol, "qty": str(int(qty)), "side": side, "type": "market",
+                "time_in_force": "day", "client_order_id": client_order_id[:128]}
+        log.warning("submit stock %s %s x%s (market) to flatten an assignment", side, symbol, qty)
+        return self._post_order(body)
 
     def replace_order(self, order_id: str, limit_price: float) -> dict:
         return self._trade("PATCH", f"/v2/orders/{order_id}", json={"limit_price": f"{limit_price:.2f}"},
-                           mutate=True)
+                           mutate=True, retry=False)
 
     def cancel_order(self, order_id: str) -> None:
         self._trade("DELETE", f"/v2/orders/{order_id}", mutate=True)
 
-    def cancel_all(self) -> None:
-        self._trade("DELETE", "/v2/orders", mutate=True)
+    def cancel_all(self, timeout: float = 30.0) -> list[dict]:
+        """Cancel the bot's own open orders (client_order_id 'options-...') and wait
+        until none is open. Orders the bot did not send are never touched.
+        Returns the bot orders still open at the timeout (normally [])."""
+        waited, delay = 0.0, 0.5
+        while True:
+            mine = [o for o in self.open_orders() if is_bot_order(o)]
+            if not mine:
+                return []
+            for o in mine:
+                if str(o.get("status")) in ("pending_cancel",):
+                    continue
+                try:
+                    self.cancel_order(o["id"])
+                except BrokerError as e:
+                    log.warning("cancel %s failed: %s", o.get("id"), e)
+            if waited >= timeout:
+                log.error("%d bot order(s) still open after %.0fs: %s", len(mine), timeout,
+                          ", ".join(str(o.get("id")) for o in mine))
+                return mine
+            self.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, 4)
 
     def get_order(self, order_id: str) -> dict:
         return self._trade("GET", f"/v2/orders/{order_id}", params={"nested": "true"})
+
+    def get_order_by_client_id(self, cid: str) -> dict | None:
+        return self._trade("GET", "/v2/orders:by_client_order_id", params={"client_order_id": cid},
+                           none_on_404=True)
 
     def open_orders(self) -> list[dict]:
         if not self.has_trading:
             return []
         return self._trade("GET", "/v2/orders", params={"status": "open", "nested": "true", "limit": 500})
 
-    def fills(self, after: str) -> list[dict]:
+    def activities(self, types: list[str], after: str) -> list[dict]:
         if not self.has_trading:
             return []
         out, token = [], None
         while True:
-            params = {"activity_types": "FILL", "after": after, "direction": "asc", "page_size": 100}
+            params = {"activity_types": ",".join(types), "after": after, "direction": "asc", "page_size": 100}
             if token:
                 params["page_token"] = token
             page = self._trade("GET", "/v2/account/activities", params=params)
@@ -215,6 +345,9 @@ class Broker:
                 break
             token = page[-1]["id"]
         return out
+
+    def fills(self, after: str) -> list[dict]:
+        return self.activities(["FILL"], after)
 
     # ------------------------------------------------------------ market data (data host, read-only)
     def daily_bars(self, symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
@@ -301,5 +434,11 @@ def _snap_to_quote(sym: str, snap: dict) -> OptionQuote | None:
     q = snap.get("latestQuote") or {}
     g = snap.get("greeks") or {}
     delta = g.get("delta")
+    ts = None
+    if q.get("t"):
+        try:
+            ts = pd.Timestamp(q["t"]).tz_convert(ET).floor("us").to_pydatetime()
+        except (ValueError, TypeError):
+            ts = None
     return OptionQuote(sym, root, exp, cp, k, _f(q.get("bp")), _f(q.get("ap")),
-                       float(delta) if delta is not None else None, _f(snap.get("impliedVolatility"), None))
+                       float(delta) if delta is not None else None, _f(snap.get("impliedVolatility"), None), ts)

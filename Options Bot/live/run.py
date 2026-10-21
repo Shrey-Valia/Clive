@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Live paper trading: RSI(2)/IBS dip -> 7-14 DTE 0.25/0.10 delta put credit spread.
 
-    python3 live/run.py                    dry run: wait for 15:50 ET, print what it would do
+    python3 live/run.py                    dry run: wait for the decision time (15:55 ET), print what it would do
     python3 live/run.py --now              dry run immediately (any time; uses the latest prices)
-    python3 live/run.py --execute          cron 15:45 ET: exits + entries at 15:50, cancel by 15:58
+    python3 live/run.py --execute          cron 15:45 ET: exits + entries at the decision time, cancel by 15:58
     python3 live/run.py --intraday --execute   take-profit / stop checks only (every 15 min)
+    python3 live/run.py --sweep --execute  expiry-day morning sweep (cron 09:45 ET, mandatory)
     python3 live/run.py --check            health check (keys, paper account, data, VIX, Supabase)
     python3 live/run.py --close-all        emergency: show how every spread would be closed
     python3 live/run.py --close-all --execute  ... and close them now (aggressive prices)
@@ -30,6 +31,7 @@ from live import config as C  # noqa: E402
 from live import db, execution, signals, state  # noqa: E402
 from live import strategy as S  # noqa: E402
 from live.broker import ET, Broker, BrokerError, SafetyError  # noqa: E402
+from live.broker import client_order_id  # noqa: E402,F401
 
 log = logging.getLogger("optionslive")
 # Known early closes (13:00 ET), used only when no options account (calendar) is available.
@@ -79,69 +81,134 @@ def sessions_list(broker: Broker, hist_index, today: dt.date) -> list[dt.date]:
 
 # ---------------------------------------------------------------- planning
 class Ctx:
-    """Per-run caches (daily history, live signals) so each symbol is fetched once."""
+    """Per-run caches (daily history, live signals) so each symbol is fetched once.
+    ``strict`` (execute mode, or a dry run waiting for the decision time) makes
+    stale live prices and option quotes fail closed."""
 
-    def __init__(self, broker: Broker, today: dt.date):
-        self.broker, self.today = broker, today
+    def __init__(self, broker: Broker, today: dt.date, strict: bool = False, now: dt.datetime | None = None):
+        self.broker, self.today, self.strict = broker, today, strict
+        self._now = now
         self.hist: dict = {}
         self.sig: dict = {}
+        self.warnings: list[str] = []
+
+    def now(self) -> dt.datetime:
+        return self._now or now_et()
+
+    def warn(self, msg: str) -> None:
+        log.warning(msg)
+        self.warnings.append(msg)
 
     def signal(self, sym: str) -> S.Signal:
         if sym not in self.sig:
             if sym not in self.hist:
                 self.hist[sym] = self.broker.daily_bars(sym, self.today - dt.timedelta(days=signals.HISTORY_DAYS),
                                                         self.today - dt.timedelta(days=1))
-            sig, bars, lb = signals.signal_for(self.broker, sym, self.today, self.hist[sym])
+            sig, bars, lb = signals.signal_for(
+                self.broker, sym, self.today, self.hist[sym], now=self.now(),
+                max_trade_age=C.MAX_STOCK_TRADE_AGE_SECONDS if self.strict else None)
             sig.live = lb
             self.sig[sym] = S.entry_signal(sig)
         return self.sig[sym]
 
 
-def plan_exits(ctx: Ctx, records: dict, sessions: list[dt.date], end_of_day: bool, force_all: bool = False):
-    """Returns (jobs, rows) for open spreads that should close now."""
+def _stale(q, ctx: Ctx) -> bool:
+    if not ctx.strict or q is None:
+        return False
+    age = q.age_seconds(ctx.now())
+    return age is None or age > C.MAX_OPTION_QUOTE_AGE_SECONDS
+
+
+def plan_exits(ctx: Ctx, records: dict, sessions: list[dt.date], end_of_day: bool, force_all: bool = False,
+               mode: str = "daily"):
+    """Returns (jobs, rows) for open spreads that should close now.
+
+    mode: "daily" (all rules), "intraday" (take-profit / stop, plus spreads that
+    expire today), "sweep" (only spreads expiring today or earlier), "close_all".
+    A missing or zero bid on the long leg never blocks an exit, and a forced
+    exit (expiry, sweep, close-all) without usable quotes is priced from the
+    intrinsic value (S.blind_exit_prices) with a warning."""
     jobs, rows = [], []
     if not records:
         return jobs, rows
     syms = sorted({r[k] for r in records.values() for k in ("short_symbol", "long_symbol")})
-    quotes = ctx.broker.option_quotes(syms)
+    try:
+        quotes = ctx.broker.option_quotes(syms)
+    except Exception as e:                      # noqa: BLE001
+        ctx.warn(f"option quotes unavailable for exits: {e}")
+        quotes = {}
     for sid, r in sorted(records.items()):
         sq, lq = quotes.get(r["short_symbol"]), quotes.get(r["long_symbol"])
         width = r["short_strike"] - r["long_strike"]
-        mid = natural = None
-        if sq and lq and sq.valid and lq.valid:
-            mid = round(sq.mid - lq.mid, 4)
-            natural = round(sq.ask - lq.bid, 4)
+        mid, natural, qnote = S.exit_prices(sq, lq)
+        stale = _stale(sq, ctx) or (lq is not None and lq.quoted and _stale(lq, ctx))
         exp = dt.date.fromisoformat(r["expiry"])
         held = S.held_trading_days(dt.date.fromisoformat(r["entry_date"]), ctx.today, sessions)
         tdte = S.trading_days_until(exp, ctx.today, sessions)
         try:
             sig = ctx.signal(r["underlying"])
             close, sma5 = sig.close, sig.sma5
-        except Exception as e:
+        except Exception as e:                  # noqa: BLE001
             log.error("%s: no live features for exit check: %s", sid, e)
             close, sma5 = math.nan, math.nan
-        reason = "emergency_close" if force_all else S.exit_reason(
-            entry_credit=float(r["entry_credit"]), cost_to_close=mid, close=close, sma5=sma5,
-            held_days=held, trading_days_to_expiry=tdte, end_of_day=end_of_day)
-        row = {"id": sid, "qty": r["qty"], "entry_credit": r["entry_credit"], "mid_debit": mid,
-               "natural_debit": natural, "held": held, "tdte": tdte, "close": close, "sma5": sma5,
-               "reason": reason}
+        basis = float(r.get("entry_mid") or r["entry_credit"])     # research: TP vs the mid credit at entry
+        if force_all:
+            reason = "emergency_close"
+        elif mode == "sweep":
+            reason = "expiry_day_sweep" if exp <= ctx.today else None
+        else:
+            reason = S.exit_reason(entry_credit=basis, cost_to_close=None if stale else mid, close=close,
+                                   sma5=sma5, held_days=held, trading_days_to_expiry=tdte, end_of_day=end_of_day)
+            if mode == "intraday" and reason == "expiry_exit" and exp > ctx.today:
+                reason = None                   # the daily run closes it at the decision time
+            if mode == "intraday" and exp <= ctx.today:
+                reason = "expiry_day_sweep"
+            if (reason is None and end_of_day and r["underlying"] in C.SINGLE_NAMES
+                    and _earnings_on(r["underlying"], ctx.today)):
+                reason = "earnings_exit"
+        row = {"id": sid, "qty": r["qty"], "entry_credit": r["entry_credit"], "entry_mid": r.get("entry_mid"),
+               "mid_debit": mid, "natural_debit": natural, "held": held, "tdte": tdte, "close": close,
+               "sma5": sma5, "reason": reason, "note": qnote, "expiry": exp}
         rows.append(row)
+        if stale:
+            ctx.warn(f"{sid}: option quotes are stale; take-profit not evaluated")
+        if qnote:
+            log.info("%s: %s", sid, qnote)
         if not reason:
             continue
+        forced = force_all or reason in ("expiry_exit", "expiry_day_sweep")
         if mid is None:
-            log.error("%s: wants %s but has no two-sided quotes; NOT closing automatically", sid, reason)
-            row["reason"] = f"{reason} (blocked: no quotes)"
-            continue
-        if force_all:
-            ladder = S.exit_ladder(mid, natural, steps=2)
+            if not forced:
+                log.error("%s: wants %s but the short leg has no offer; not closing this run", sid, reason)
+                row["reason"] = f"{reason} (blocked: no quotes)"
+                ctx.warn(f"{sid}: {reason} blocked, no quotes")
+                continue
+            ladder, cut = S.blind_exit_prices(r["short_strike"], r["long_strike"],
+                                              close if math.isfinite(close) else None)
+            ctx.warn(f"{sid}: {reason} with no usable quotes; pricing from intrinsic value {ladder} / cutoff {cut}")
+            mid, natural = ladder[0], ladder[-1]
         else:
-            ladder = S.exit_ladder(mid, natural)
+            ladder = S.exit_ladder(mid, natural, steps=2) if force_all else S.exit_ladder(mid, natural)
+            cut = S.exit_cutoff_price(natural, width)
+        if qnote and forced:
+            ctx.warn(f"{sid}: {reason} with {qnote}")
         jobs.append(execution.Job(sid, "close", execution.close_legs(r["short_symbol"], r["long_symbol"]),
-                                  int(r["qty"]), ladder, credit=False,
-                                  cutoff_price=S.exit_cutoff_price(natural, width),
-                                  meta={"record": r, "reason": reason, "mid": mid, "natural": natural}))
+                                  int(r["qty"]), ladder, credit=False, cutoff_price=cut,
+                                  meta={"record": r, "reason": reason, "mid": mid, "natural": natural,
+                                        "tdte": tdte, "expiry": exp}))
     return jobs, rows
+
+
+def _earnings_on(sym: str, day: dt.date) -> bool:
+    from optionsbot.strategies_signals import EARNINGS
+    import pandas as pd
+    return pd.Timestamp(day) in EARNINGS.get(sym, [])
+
+
+def _earnings_between(sym: str, a: dt.date, b: dt.date) -> bool:
+    from optionsbot.strategies_signals import EARNINGS
+    import pandas as pd
+    return any(pd.Timestamp(a) <= e <= pd.Timestamp(b) for e in EARNINGS.get(sym, []))
 
 
 def open_max_loss(records: dict) -> float:
@@ -162,7 +229,7 @@ def plan_entries(ctx: Ctx, records: dict, acct: dict, kill: tuple[bool, str], sy
         rows.append(row)
         try:
             sig = ctx.signal(sym)
-        except Exception as e:
+        except Exception as e:                  # noqa: BLE001  (stale / missing data: fail closed)
             row["action"] = f"skip: data error {e}"
             continue
         row.update(close=sig.close, sma200=sig.sma200, rsi2=sig.rsi2, ibs=sig.ibs, src=sig.live["source"])
@@ -178,31 +245,32 @@ def plan_entries(ctx: Ctx, records: dict, acct: dict, kill: tuple[bool, str], sy
             row["action"] = blocked
             continue
         exp_hi = ctx.today + dt.timedelta(days=C.DTE_MAX)
-        if sym in C.SINGLE_NAMES:
-            from optionsbot.strategies_signals import EARNINGS
-            import pandas as pd
-            if any(pd.Timestamp(ctx.today) <= e <= pd.Timestamp(exp_hi) for e in EARNINGS.get(sym, [])):
-                row["action"] = "signal, but earnings before expiry"
-                continue
-        chain = ctx.broker.option_chain(sym, ctx.today + dt.timedelta(days=C.DTE_MIN), exp_hi)
+        try:
+            chain = ctx.broker.option_chain(sym, ctx.today + dt.timedelta(days=C.DTE_MIN), exp_hi)
+        except Exception as e:                  # noqa: BLE001
+            row["action"] = f"signal, but option chain unavailable: {e}" if not blocked else blocked
+            continue
         pick, why = S.pick_spread(chain, sym, ctx.today)
         if pick is None:
-            row["action"] = f"signal, but no spread: {why}"
+            row["action"] = f"signal, but no spread: {why}" if not blocked else f"{blocked} | preview: {why}"
             continue
         row["pick"] = pick
-        bad = S.check_pick(pick)
+        if sym in C.SINGLE_NAMES and _earnings_between(sym, ctx.today, pick.expiry):   # research window
+            row["action"] = "signal, but earnings before expiry"
+            continue
+        bad = S.check_pick(pick, now=ctx.now() if ctx.strict else None)
+        ladder = S.entry_ladder(pick)
         if blocked:
-            n, why = S.size_position(acct["equity"], pick.width, pick.mid_credit, used, bp)
+            n, why = S.size_position(acct["equity"], pick.width, ladder[-1], used, bp)
             row["action"] = f"{blocked} | preview: {'guard: ' + bad if bad else f'would size {n}x ({why})'}"
             continue
         if bad:
             row["action"] = f"signal, but skip: {bad}"
             continue
-        n, why = S.size_position(acct["equity"], pick.width, pick.mid_credit, used, bp)
+        n, why = S.size_position(acct["equity"], pick.width, ladder[-1], used, bp)   # worst ladder credit
         if n == 0:
             row["action"] = f"signal, but size 0: {why}"
             continue
-        ladder = S.entry_ladder(pick)
         used += S.max_loss(pick.width, ladder[-1], n)
         if bp is not None:
             bp -= pick.width * 100 * n
@@ -221,16 +289,20 @@ def _fmt(x, f="{:.2f}"):
     return f.format(x) if isinstance(x, (int, float)) and math.isfinite(x) else "-"
 
 
-def print_plan(acct, kill, vix, exit_rows, entry_rows, mode):
+def print_plan(acct, kill, vix, exit_rows, entry_rows, mode, decide=None):
     log.info("=" * 96)
     log.info("MODE %s | equity $%s%s | %s", mode, f"{acct['equity']:,.2f}",
              " (SIMULATED, no options account yet)" if acct.get("simulated") else "", vix["source"])
+    if decide is not None:
+        log.info("decision time %s ET (DECIDE_MINUTES_BEFORE_CLOSE=%d)", f"{decide:%H:%M}",
+                 C.DECIDE_MINUTES_BEFORE_CLOSE)
     log.info("kill switch: %s -> %s", "BLOCK" if kill[0] else "ok", kill[1])
     log.info("-- open spreads: %d", len(exit_rows))
     for r in exit_rows:
-        log.info("   %-26s x%-3s credit %s  mid %s  nat %s  held %sd  tdte %s  close %s vs 5DMA %s -> %s",
-                 r["id"], r["qty"], _fmt(float(r["entry_credit"])), _fmt(r["mid_debit"]), _fmt(r["natural_debit"]),
-                 r["held"], r["tdte"], _fmt(r["close"]), _fmt(r["sma5"]), r["reason"] or "hold")
+        log.info("   %-26s x%-3s credit %s (mid %s)  cost mid %s  nat %s  held %sd  tdte %s  close %s vs 5DMA %s -> %s",
+                 r["id"], r["qty"], _fmt(float(r["entry_credit"])), _fmt(r.get("entry_mid")), _fmt(r["mid_debit"]),
+                 _fmt(r["natural_debit"]), r["held"], r["tdte"], _fmt(r["close"]), _fmt(r["sma5"]),
+                 r["reason"] or "hold")
     log.info("-- entry signals")
     for r in entry_rows:
         log.info("   %-5s close %s 200DMA %s RSI2 %s IBS %s [%s] -> %s", r["symbol"], _fmt(r.get("close")),
@@ -250,74 +322,258 @@ def print_plan(acct, kill, vix, exit_rows, entry_rows, mode):
 
 
 # ---------------------------------------------------------------- applying results
+TRADE_COLS = ("id", "spread_id", "underlying", "expiry", "short_strike", "long_strike", "qty", "opened_at",
+              "closed_at", "entry_credit", "exit_debit", "pnl", "pnl_pct", "exit_reason")
+
+
+def trade_id(key: str, entry_date: str, closed: str, order_id: str | None) -> str:
+    """Unique per closing order: two partial closes on one day get two ids."""
+    return f"{key}-{entry_date}-{closed}-{(order_id or 'x')[-12:]}"
+
+
 def apply_results(jobs, records: dict, today: dt.date, run_id, persist: bool) -> list[dict]:
     trades = []
     for j in jobs:
-        q = int(round(j.filled_qty))
-        orow = {"key": j.key, "purpose": j.purpose, "status": j.status, "qty": j.qty, "filled_qty": q,
-                "avg_price": j.avg_price, "order_ids": j.order_ids, "history": j.history, "error": j.error,
-                "date": today.isoformat()}
-        log.info("%s %s: %s %d/%d @ %s", j.purpose, j.key, j.status, q, j.qty, _fmt(j.avg_price))
-        if persist:
-            state.append(state.ORDERS, orow)
-            db.insert("options_live_orders", {
-                "id": j.order_ids[-1] if j.order_ids else f"none-{j.key}-{today}", "run_id": run_id,
-                "spread_id": j.key, "underlying": j.key.split("-")[0], "purpose": j.purpose,
-                "qty": j.qty, "filled_qty": q, "limit_prices": j.prices, "avg_price": j.avg_price,
-                "status": j.status, "attempts": len(j.order_ids), "history": j.history, "error": j.error,
-                "submitted_at": j.history[0]["t"] if j.history else None}, upsert_on="id")
-        if q <= 0:
+        try:
+            t = _apply_one(j, records, today, run_id, persist)
+        except Exception as e:                  # noqa: BLE001  (one bad job must not lose the others)
+            log.error("apply_results %s %s failed: %s\n%s", j.purpose, j.key, e, traceback.format_exc())
             continue
-        if j.purpose == "open":
-            p = j.meta["pick"]
-            records[j.key] = {"underlying": p.underlying, "expiry": p.expiry.isoformat(),
-                              "short_symbol": p.short.symbol, "long_symbol": p.long.symbol,
-                              "short_strike": p.short.strike, "long_strike": p.long.strike, "qty": q,
-                              "entry_date": today.isoformat(), "entry_credit": j.avg_price,
-                              "entry_mid": p.mid_credit, "signal": j.meta["signal"],
-                              "short_delta": p.short.delta, "long_delta": p.long.delta,
-                              "order_ids": j.order_ids}
-        else:
-            r = j.meta["record"]
-            width = r["short_strike"] - r["long_strike"]
-            pnl = round((float(r["entry_credit"]) - j.avg_price) * 100 * q, 2)
-            t = {"id": f"{j.key}-{r['entry_date']}-{today}", "spread_id": j.key, "underlying": r["underlying"],
-                 "expiry": r["expiry"], "short_strike": r["short_strike"], "long_strike": r["long_strike"],
-                 "qty": q, "opened_at": r["entry_date"], "closed_at": today.isoformat(),
-                 "entry_credit": r["entry_credit"], "exit_debit": j.avg_price, "pnl": pnl,
-                 "pnl_pct": round(pnl / max(S.max_loss(width, float(r["entry_credit"]), q), 1e-9), 4),
-                 "exit_reason": j.meta["reason"]}
+        if t:
             trades.append(t)
-            left = int(r["qty"]) - q
-            if left > 0:
-                records[j.key] = {**r, "qty": left}
-            else:
-                records.pop(j.key, None)
-            if persist:
-                state.append(state.TRADES, t)
-                db.insert("options_live_trades", t, upsert_on="id")
     return trades
 
 
-# ---------------------------------------------------------------- modes
+def _apply_one(j, records: dict, today: dt.date, run_id, persist: bool):
+    q = int(round(j.filled_qty))
+    orow = {"key": j.key, "purpose": j.purpose, "status": j.status, "qty": j.qty, "filled_qty": q,
+            "avg_price": j.avg_price, "order_ids": j.order_ids, "fills": j.fills, "history": j.history,
+            "error": j.error, "date": today.isoformat()}
+    log.info("%s %s: %s %d/%d @ %s", j.purpose, j.key, j.status, q, j.qty, _fmt(j.avg_price))
+    if persist:
+        state.append(state.ORDERS, orow)
+        db.insert("options_live_orders", {
+            "id": j.order_ids[-1] if j.order_ids else f"none-{j.key}-{today}", "run_id": run_id,
+            "spread_id": j.key, "underlying": j.key.split("-")[0], "purpose": j.purpose,
+            "qty": j.qty, "filled_qty": q, "limit_prices": j.prices, "avg_price": j.avg_price,
+            "status": j.status, "attempts": len(j.order_ids), "history": j.history, "error": j.error,
+            "submitted_at": j.history[0]["t"] if j.history else None}, upsert_on="id")
+    if q <= 0:
+        return None
+    if j.purpose == "open":
+        p = j.meta["pick"]
+        prev = records.get(j.key)
+        if prev:                                # same spread already held (should not happen): merge
+            n0 = int(prev["qty"])
+            credit = (float(prev["entry_credit"]) * n0 + j.avg_price * q) / (n0 + q)
+            records[j.key] = {**prev, "qty": n0 + q, "entry_credit": round(credit, 4),
+                              "order_ids": list(prev.get("order_ids", [])) + j.order_ids}
+            return None
+        records[j.key] = {"underlying": p.underlying, "expiry": p.expiry.isoformat(),
+                          "short_symbol": p.short.symbol, "long_symbol": p.long.symbol,
+                          "short_strike": p.short.strike, "long_strike": p.long.strike, "qty": q,
+                          "entry_date": today.isoformat(), "entry_credit": j.avg_price,
+                          "entry_mid": p.mid_credit, "signal": j.meta["signal"],
+                          "short_delta": p.short.delta, "long_delta": p.long.delta,
+                          "order_ids": j.order_ids}
+        return None
+    r = j.meta["record"]
+    width = r["short_strike"] - r["long_strike"]
+    pnl = round((float(r["entry_credit"]) - j.avg_price) * 100 * q, 2)
+    fill_ids = [o for o in j.order_ids if o in j.fills]
+    t = {"id": trade_id(j.key, r["entry_date"], today.isoformat(), fill_ids[-1] if fill_ids else None),
+         "spread_id": j.key, "underlying": r["underlying"],
+         "expiry": r["expiry"], "short_strike": r["short_strike"], "long_strike": r["long_strike"],
+         "qty": q, "opened_at": r["entry_date"], "closed_at": today.isoformat(),
+         "entry_credit": r["entry_credit"], "exit_debit": j.avg_price, "pnl": pnl,
+         "pnl_pct": round(pnl / max(S.max_loss(width, float(r["entry_credit"]), q), 1e-9), 4),
+         "exit_reason": j.meta["reason"]}
+    left = int(r["qty"]) - q
+    if left > 0:
+        records[j.key] = {**r, "qty": left}
+    else:
+        records.pop(j.key, None)
+    if persist:
+        state.append(state.TRADES, t)
+        db.insert("options_live_trades", t, upsert_on="id")
+    return t
+
+
+# ---------------------------------------------------------------- book: broker positions vs local records
+def _recover_entry(broker: Broker, sid: str, short_symbol: str, today: dt.date) -> tuple[str, str] | None:
+    """(entry date, source) for a spread held at the broker with no local record:
+    the order journal first, then the account's FILL activities."""
+    for row in reversed(state.read_jsonl(state.ORDERS)):
+        if row.get("key") == sid and row.get("purpose") == "open" and (row.get("filled_qty") or 0) > 0:
+            return row["date"], "order journal"
+    try:
+        fills = broker.fills((today - dt.timedelta(days=45)).isoformat())
+    except Exception as e:                      # noqa: BLE001
+        log.warning("%s: fills unavailable for entry-date recovery: %s", sid, e)
+        return None
+    opens = [f for f in fills if f.get("symbol") == short_symbol and f.get("side") in ("sell", "sell_short")]
+    if not opens:
+        return None
+    import pandas as pd
+    t = pd.Timestamp(opens[-1]["transaction_time"]).tz_convert(ET).date()
+    return t.isoformat(), "fills"
+
+
+def _external_close(broker: Broker, v: dict, today: dt.date) -> dict:
+    """Best-effort P&L for a spread that left the broker outside the bot (expired,
+    assigned, closed by hand): FILL / OPEXP / OPASN / OPEXC activities since entry."""
+    qty = int(v.get("qty") or 0)
+    reason, exit_debit, pnl = "external", None, None
+    try:
+        acts = broker.activities(["FILL", "OPEXP", "OPASN", "OPEXC"], v.get("entry_date") or today.isoformat())
+    except Exception as e:                      # noqa: BLE001
+        log.warning("%s: activities unavailable: %s", v["id"], e)
+        acts = []
+
+    def leg_exit(sym, close_side):
+        kinds = {a.get("activity_type") for a in acts if a.get("symbol") == sym}
+        if "OPASN" in kinds or "OPEXC" in kinds:
+            return None, "assigned"
+        fl = [a for a in acts if a.get("symbol") == sym and a.get("activity_type") == "FILL"
+              and a.get("side") == close_side]
+        n = sum(float(a.get("qty") or 0) for a in fl)
+        if n > 0:
+            return sum(float(a["price"]) * float(a.get("qty") or 0) for a in fl) / n, "closed"
+        if "OPEXP" in kinds:
+            return 0.0, "expired"
+        return None, "unknown"
+
+    s_px, s_how = leg_exit(v.get("short_symbol"), "buy")
+    l_px, l_how = leg_exit(v.get("long_symbol"), "sell")
+    reason = f"external_{s_how}"
+    if s_px is not None and l_px is not None and v.get("entry_credit") is not None:
+        exit_debit = round(s_px - l_px, 4)
+        pnl = round((float(v["entry_credit"]) - exit_debit) * 100 * qty, 2)
+    width = float(v.get("short_strike", 0)) - float(v.get("long_strike", 0))
+    ml = S.max_loss(width, float(v.get("entry_credit") or 0), qty) if qty else 0
+    return {"id": trade_id(v["id"], v.get("entry_date", "?"), today.isoformat(), "external"),
+            "spread_id": v["id"], "underlying": v.get("underlying"), "expiry": v.get("expiry"),
+            "short_strike": v.get("short_strike"), "long_strike": v.get("long_strike"), "qty": qty,
+            "opened_at": v.get("entry_date"), "closed_at": today.isoformat(), "entry_credit": v.get("entry_credit"),
+            "exit_debit": exit_debit, "pnl": pnl,
+            "pnl_pct": round(pnl / ml, 4) if pnl is not None and ml else None, "exit_reason": reason}
+
+
 def load_book(broker: Broker, today: dt.date, persist: bool):
+    """(records, orphan option legs, stock positions, raw positions)."""
     pos = broker.positions()
-    spreads, orphans = S.group_spreads(pos)
+    stocks = [p for p in pos if S.parse_occ(p.get("symbol", "")) is None]
+    spreads, orphans = S.group_spreads([p for p in pos if p not in stocks])
     for o in orphans:
-        log.warning("unpaired position (not traded automatically): %s qty %s", o.get("symbol"), o.get("qty"))
+        log.warning("unpaired option leg (not traded automatically): %s qty %s (unmatched %s)",
+                    o.get("symbol"), o.get("qty"), o.get("unmatched_qty"))
+    for p in stocks:
+        log.error("STOCK position %s qty %s in the options account: assignment or exercise", p["symbol"], p["qty"])
     stored = state.load_positions()
     records, adopted, vanished = state.reconcile(spreads, stored, today)
     for a in adopted:
-        log.warning("adopted spread %s from the broker with no local record (entry date set to today)", a)
+        rec = _recover_entry(broker, a, records[a]["short_symbol"], today)
+        if rec:
+            records[a]["entry_date"], records[a]["entry_date_source"] = rec
+            log.warning("adopted spread %s with no local record; entry date %s from the %s", a, rec[0], rec[1])
+        else:
+            log.warning("adopted spread %s with no local record; entry date unknown, set to today", a)
     for v in vanished:
         log.warning("spread %s is no longer at the broker (expired/assigned/closed outside the bot)", v["id"])
         if persist:
-            state.append(state.TRADES, {**v, "closed_at": today.isoformat(), "exit_reason": "external"})
+            t = _external_close(broker, v, today)
+            log.warning("   journaled as %s, P&L %s", t["exit_reason"], _fmt(t["pnl"]))
+            state.append(state.TRADES, t)
+            if t["pnl"] is not None:
+                db.insert("options_live_trades", t, upsert_on="id")
     if persist and (adopted or vanished):
         state.save_positions(records)
-    return records, orphans, pos
+    return records, orphans, stocks, pos
 
 
+def orphan_qty(o: dict) -> int:
+    """Signed quantity of an unpaired leg that is NOT part of a matched spread
+    (group_spreads' unmatched_qty; negative = short). Falls back to the raw
+    position quantity for legs that were never matched at all."""
+    if "unmatched_qty" in o:
+        return int(round(float(o["unmatched_qty"])))
+    q = int(round(float(o.get("qty") or 0)))
+    return -abs(q) if o.get("side") == "short" else q
+
+
+def flatten_stock(broker: Broker, stocks: list[dict], today: dt.date) -> list[str]:
+    """Market orders that close stock left by an assignment. Returns messages."""
+    msgs = []
+    for p in stocks:
+        qty = int(round(abs(float(p["qty"]))))
+        if qty == 0:
+            continue
+        short = p.get("side") == "short" or float(p["qty"]) < 0
+        side = "buy" if short else "sell"
+        try:
+            o = broker.submit_stock(p["symbol"], qty, side, client_order_id_for("assign", p["symbol"], today))
+            msgs.append(f"flatten {side} {qty} {p['symbol']} (order {o.get('id')}, {o.get('status')})")
+        except Exception as e:                  # noqa: BLE001
+            msgs.append(f"FAILED to flatten {qty} {p['symbol']}: {e}")
+        log.error("assignment: %s", msgs[-1])
+    return msgs
+
+
+def client_order_id_for(*parts) -> str:
+    return client_order_id(*parts)
+
+
+def _settle(broker: Broker, jobs, records: dict, today: dt.date, run_id) -> list[dict]:
+    """After working orders (or an exception while working them): cancel the
+    bot's orders, book every fill, save positions. Never raises."""
+    try:
+        left = broker.cancel_all(timeout=20) if broker.execute else []
+        if left:
+            log.error("%d bot order(s) could not be confirmed canceled", len(left))
+    except Exception as e:                      # noqa: BLE001
+        log.error("cancel sweep failed: %s", e)
+    trades = []
+    try:
+        trades = apply_results(jobs, records, today, run_id, persist=True)
+    finally:
+        try:
+            state.save_positions(records)
+        except Exception as e:                  # noqa: BLE001
+            log.error("SAVING POSITIONS FAILED: %s", e)
+    return trades
+
+
+def _lock(timeout: float):
+    """The executing-run lock. Waits up to ``timeout`` seconds; None if not acquired."""
+    C.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    fh = open(C.STATE_DIR / ".lock", "w")
+    waited = 0.0
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except BlockingIOError:
+            if waited >= timeout:
+                fh.close()
+                return None
+            time.sleep(2)
+            waited += 2
+
+
+class LockBusy(RuntimeError):
+    pass
+
+
+def _take_lock(args, timeout: float):
+    if not args.execute:
+        return
+    fh = _lock(timeout)
+    if fh is None:
+        raise LockBusy(f"another executing run held the lock for {timeout:.0f}s")
+    args._lock = fh
+
+
+# ---------------------------------------------------------------- modes
 def run_daily(args) -> int:
     broker = Broker(execute=args.execute)
     persist = args.execute
@@ -345,43 +601,59 @@ def run_daily(args) -> int:
     if args.execute and now < sess["open_at"]:
         log.error("market not open yet; refusing")
         return 1
-    if args.execute and not args.force and state.already_ran(today):
-        log.error("already executed today (%s); use --force to run again", today)
-        return 1
     if not args.now and (decide - now).total_seconds() > 20 * 60:
         # lets one crontab carry both a 15:45 and a 12:45 (half day) line
         log.info("decision time today is %s ET; this run is too early, exiting", f"{decide:%H:%M}")
         return 0
-    if not args.now and now < decide:
-        secs = (decide - now).total_seconds()
-        log.info("waiting %.0fs for the 15:50-equivalent decision time (%s ET)", secs, f"{decide:%H:%M}")
-        time.sleep(secs)
+    _take_lock(args, C.LOCK_TIMEOUT_SECONDS)    # window checked first; wait for an intraday run to finish
+    if args.execute and not args.force and state.already_ran(today):
+        log.error("already executed today (%s); use --force to run again", today)
+        return 1
     acct = broker.account()
+    warnings: list[str] = []
     if args.execute:
         lvl = acct.get("options_trading_level")
         if lvl is None or int(lvl) < 3:
             log.error("options trading level %s < 3: spreads need level 3 on the paper account", lvl)
+            db.heartbeat("error", f"{today}: options level {lvl} < 3")
             return 1
         if acct.get("trading_blocked"):
             log.error("account trading is blocked")
+            db.heartbeat("error", f"{today}: account trading blocked")
             return 1
-        stale = broker.open_orders()
-        if stale:
-            log.warning("canceling %d open orders left from earlier", len(stale))
-            broker.cancel_all()
-    records, orphans, _ = load_book(broker, today, persist)
-    ctx = Ctx(broker, today)
+        left = broker.cancel_all()              # the bot's own leftovers only; waits until none is open
+        if left:
+            msg = f"{today}: {len(left)} earlier bot order(s) would not cancel; refusing to trade"
+            log.error(msg)
+            db.heartbeat("error", msg)
+            return 1
+    if not args.now and now_et() < decide:
+        secs = (decide - now_et()).total_seconds()
+        log.info("waiting %.0fs for the decision time (%s ET)", secs, f"{decide:%H:%M}")
+        time.sleep(max(secs, 0))
+    records, orphans, stocks, _ = load_book(broker, today, persist)
+    if stocks:
+        warnings.append(f"assignment: {len(stocks)} stock position(s)")
+        if args.execute:
+            warnings += flatten_stock(broker, stocks, today)
+    if orphans:
+        warnings.append(f"{len(orphans)} unpaired option leg(s)")
+    ctx = Ctx(broker, today, strict=args.execute or not args.now)
     spy = ctx.hist.setdefault("SPY", broker.daily_bars("SPY", today - dt.timedelta(days=signals.HISTORY_DAYS),
                                                        today - dt.timedelta(days=1)))
     sessions = sessions_list(broker, spy.index, today)
-    vix = signals.vix_levels(today)
-    kill = S.kill_switch(vix["vix"], vix["vix3m"])
+    vix = signals.vix_levels(today, now=now_et())
+    kill = S.kill_switch(vix["vix"], vix["vix3m"], fresh=vix["fresh"], stale_reason=vix["stale_reason"])
     exit_jobs, exit_rows = plan_exits(ctx, records, sessions, end_of_day=True)
+    late = [r["id"] for r in exit_rows if r["expiry"] <= today]
+    if late:
+        warnings.append(f"EXPIRING TODAY, past Alpaca's 15:30 expiration handling: {', '.join(late)}")
     closing = {j.key for j in exit_jobs}
     symbols = args.symbols.split(",") if args.symbols else C.universe()
     entry_jobs, entry_rows = plan_entries(ctx, records, acct, kill, symbols, preview=args.preview)
     mode = "EXECUTE" if args.execute else "DRY RUN"
-    print_plan(acct, kill, vix, exit_rows, entry_rows, mode)
+    print_plan(acct, kill, vix, exit_rows, entry_rows, mode, decide)
+    warnings += ctx.warnings
     run = db.insert("options_live_runs", {
         "run_date": today, "mode": "execute" if args.execute else "dry_run", "kind": "daily",
         "status": "planned", "started_at": dt.datetime.now(dt.timezone.utc), "equity": acct["equity"],
@@ -391,65 +663,106 @@ def run_daily(args) -> int:
         "message": f"{len(exit_jobs)} exits, {len(entry_jobs)} entries planned"})
     run_id = run[0]["id"] if run else None
     if not args.execute:
-        window = (f"from {max(now, decide):%H:%M} to {cutoff:%H:%M} ET" if now < cutoff
+        window = (f"from {max(now_et(), decide):%H:%M} to {cutoff:%H:%M} ET" if now_et() < cutoff
                   else f"in the {decide:%H:%M}-{cutoff:%H:%M} ET window (market already closed; prices are the latest available)")
         log.info("DRY RUN: nothing sent. %d exit(s) and %d entr%s would be worked %s.",
                  len(exit_jobs), len(entry_jobs), "y" if len(entry_jobs) == 1 else "ies", window)
+        for w in warnings:
+            log.warning("warning: %s", w)
         db.heartbeat("ok", f"{today}: dry run, {len(exit_jobs)} exits / {len(entry_jobs)} entries planned")
         return 0
     state.mark_ran(today)
     jobs = exit_jobs + [j for j in entry_jobs if j.key not in closing]
-    execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=hard_stop)
-    trades = apply_results(jobs, records, today, run_id, persist=True)
-    state.save_positions(records)
+    trades = []
+    try:
+        execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=hard_stop)
+    finally:
+        trades = _settle(broker, jobs, records, today, run_id)
     n_open = sum(1 for j in entry_jobs if j.filled_qty > 0)
     n_close = sum(1 for j in exit_jobs if j.filled_qty > 0)
-    unfilled_exits = [j.key for j in exit_jobs if j.remaining > 0]
-    msg = f"{today}: opened {n_open}, closed {n_close}, {len(records)} open, realized ${sum(t['pnl'] for t in trades):,.2f}"
-    if unfilled_exits:
-        msg += f"; EXITS NOT FILLED: {', '.join(unfilled_exits)}"
-        log.error(msg)
+    unfilled = [j for j in exit_jobs if j.remaining > 0]
+    urgent = [j.key for j in unfilled if j.meta.get("tdte", 99) <= C.CLOSE_DTE_TRADING_DAYS]
+    msg = (f"{today}: opened {n_open}, closed {n_close}, {len(records)} open, "
+           f"realized ${sum(t['pnl'] for t in trades):,.2f}")
+    if unfilled:
+        msg += f"; EXITS NOT FILLED: {', '.join(j.key for j in unfilled)}"
+    if urgent:
+        msg += (f"; EXPIRY EXIT NOT FILLED (tdte<=1): {', '.join(urgent)}: the --sweep run closes them after "
+                f"the open tomorrow, before Alpaca's 15:30 expiration handling; check them by hand")
+    if warnings:
+        msg += "; warnings: " + " | ".join(warnings)
+    level = "error" if urgent or stocks else ("warning" if unfilled or warnings else "ok")
+    (log.error if level == "error" else log.warning if level == "warning" else log.info)(msg)
     if run_id:
-        db.update("options_live_runs", {"id": run_id}, {"status": "executed", "message": msg})
-    db.heartbeat("warning" if unfilled_exits else "ok", msg)
-    log.info(msg)
+        db.update("options_live_runs", {"id": run_id}, {"status": "executed", "message": msg[:2000]})
+    db.heartbeat(level, msg)
     return 0
 
 
-def run_intraday(args) -> int:
+def _intraday_window(sess: dict, kind: str):
+    if kind == "sweep":
+        start = sess["open_at"] + dt.timedelta(minutes=C.EXPIRY_SWEEP_MINUTES_AFTER_OPEN)
+    else:
+        start = sess["open_at"] + dt.timedelta(minutes=C.INTRADAY_START_MINUTES_AFTER_OPEN)
+    stop = sess["close_at"] - dt.timedelta(minutes=C.START_MINUTES_BEFORE_CLOSE + 2)
+    return start, stop
+
+
+def run_intraday(args, kind: str = "intraday") -> int:
+    """kind "intraday": take-profit / stop, plus spreads expiring today.
+    kind "sweep": the mandatory expiry-day morning sweep (spreads expiring today
+    or earlier, and stock from assignments), before Alpaca's 15:30 handling."""
     broker = Broker(execute=args.execute)
     now = now_et()
     today = now.date()
     sess = market_session(broker, today)
     if not sess["open"]:
         return 0
-    start = sess["open_at"] + dt.timedelta(minutes=C.INTRADAY_START_MINUTES_AFTER_OPEN)
-    stop = sess["close_at"] - dt.timedelta(minutes=C.START_MINUTES_BEFORE_CLOSE + 2)
-    if not args.now and not (start <= now <= stop):
-        log.info("intraday check outside its window (%s-%s ET)", f"{start:%H:%M}", f"{stop:%H:%M}")
+    start, stop = _intraday_window(sess, kind)
+    if not args.now and not (start <= now <= stop):     # checked before taking the lock
+        log.info("%s check outside its window (%s-%s ET)", kind, f"{start:%H:%M}", f"{stop:%H:%M}")
         return 0
-    records, _, _ = load_book(broker, today, args.execute)
+    _take_lock(args, 30 if kind == "sweep" else 0)
+    records, orphans, stocks, _ = load_book(broker, today, args.execute)
+    warnings = []
+    if stocks:
+        warnings.append(f"assignment: {len(stocks)} stock position(s)")
+        if args.execute:
+            warnings += flatten_stock(broker, stocks, today)
     if not records:
-        log.info("intraday: no open spreads")
+        log.info("%s: no open spreads", kind)
+        if warnings:
+            db.heartbeat("error", f"{today} {kind}: " + " | ".join(warnings))
         return 0
-    ctx = Ctx(broker, today)
+    ctx = Ctx(broker, today, strict=args.execute)
     spy = broker.daily_bars("SPY", today - dt.timedelta(days=30), today - dt.timedelta(days=1))
-    jobs, rows = plan_exits(ctx, records, sessions_list(broker, spy.index, today), end_of_day=False)
+    jobs, rows = plan_exits(ctx, records, sessions_list(broker, spy.index, today), end_of_day=False, mode=kind)
     for r in rows:
-        log.info("intraday %-26s mid %s credit %s -> %s", r["id"], _fmt(r["mid_debit"]),
+        log.info("%s %-26s mid %s credit %s -> %s", kind, r["id"], _fmt(r["mid_debit"]),
                  _fmt(float(r["entry_credit"])), r["reason"] or "hold")
     for j in jobs:                              # intraday take-profits do not chase
         if j.meta["reason"] == "take_profit":
             j.cutoff_price = None
+    warnings += ctx.warnings
     if not jobs or not args.execute:
         if jobs:
-            log.info("DRY RUN: %d intraday exit(s) not sent", len(jobs))
+            log.info("DRY RUN: %d %s exit(s) not sent", len(jobs), kind)
+        if warnings and args.execute:
+            db.heartbeat("warning", f"{today} {kind}: " + " | ".join(warnings))
         return 0
+    if any(j.meta["reason"] == "expiry_day_sweep" for j in jobs):
+        warnings.append("expiry-day sweep: " + ", ".join(j.key for j in jobs if j.meta["reason"] == "expiry_day_sweep"))
     cutoff = min(now + dt.timedelta(minutes=4), stop)
-    execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=cutoff + dt.timedelta(minutes=1),
-                          step_wait=40)
-    apply_results(jobs, records, today, None, persist=True)
-    state.save_positions(records)
+    try:
+        execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=cutoff + dt.timedelta(minutes=1),
+                              step_wait=40)
+    finally:
+        _settle(broker, jobs, records, today, None)
+    left = [j.key for j in jobs if j.remaining > 0 and j.meta["reason"] == "expiry_day_sweep"]
+    if left:
+        warnings.append(f"EXPIRING TODAY AND NOT CLOSED: {', '.join(left)}; close by hand before 15:30 ET")
+    if warnings:
+        db.heartbeat("error" if left or stocks else "warning", f"{today} {kind}: " + " | ".join(warnings))
     return 0
 
 
@@ -457,39 +770,50 @@ def run_close_all(args) -> int:
     broker = Broker(execute=args.execute)
     now = now_et()
     today = now.date()
+    _take_lock(args, 60)
     if args.execute:
         clk = broker.clock()
         if not clk or not clk.get("is_open"):
             log.error("market is closed; emergency close needs an open market")
             return 1
         broker.cancel_all()
-    records, orphans, _ = load_book(broker, today, args.execute)
+    records, orphans, stocks, _ = load_book(broker, today, args.execute)
     ctx = Ctx(broker, today)
     sessions = signals.sessions_from_bars([], today)
-    jobs, rows = plan_exits(ctx, records, sessions, end_of_day=True, force_all=True)
+    jobs, rows = plan_exits(ctx, records, sessions, end_of_day=True, force_all=True, mode="close_all")
     for r in rows:
         log.info("close-all %-26s x%s mid %s nat %s", r["id"], r["qty"], _fmt(r["mid_debit"]), _fmt(r["natural_debit"]))
     for o in orphans:
-        log.info("close-all unpaired leg %s qty %s", o.get("symbol"), o.get("qty"))
+        log.info("close-all unpaired leg %s unmatched qty %s", o.get("symbol"), o.get("unmatched_qty", o.get("qty")))
+    for p in stocks:
+        log.info("close-all stock %s qty %s (assignment)", p["symbol"], p["qty"])
     if not args.execute:
-        log.info("DRY RUN: %d spread(s) and %d unpaired leg(s) would be closed", len(jobs), len(orphans))
+        log.info("DRY RUN: %d spread(s), %d unpaired leg(s) and %d stock position(s) would be closed",
+                 len(jobs), len(orphans), len(stocks))
         return 0
-    execution.work_orders(broker, jobs, cutoff=now + dt.timedelta(minutes=3),
-                          hard_stop=now + dt.timedelta(minutes=5), step_wait=30)
-    apply_results(jobs, records, today, None, persist=True)
-    state.save_positions(records)
+    try:
+        execution.work_orders(broker, jobs, cutoff=now + dt.timedelta(minutes=3),
+                              hard_stop=now + dt.timedelta(minutes=5), step_wait=30)
+    finally:
+        _settle(broker, jobs, records, today, None)
     if orphans:
         quotes = broker.option_quotes([o["symbol"] for o in orphans])
         for o in orphans:
-            q, qty = quotes.get(o["symbol"]), abs(int(round(float(o["qty"]))))
-            if not q or qty == 0:
+            q = quotes.get(o["symbol"])
+            uq = orphan_qty(o)
+            qty = abs(uq)
+            if not q or qty == 0 or not q.quoted:
                 log.error("unpaired %s: no quote, close it manually", o.get("symbol"))
                 continue
-            short = o.get("side") == "short" or float(o["qty"]) < 0
+            short = uq < 0
             px = q.ask + C.EXIT_CUTOFF_EXTRA if short else max(q.bid - C.EXIT_CUTOFF_EXTRA, C.TICK)
-            broker.submit_single(o["symbol"], qty, "buy" if short else "sell",
-                                 "buy_to_close" if short else "sell_to_close", px,
-                                 f"{C.BOT_ID}-flat-{o['symbol']}-{int(time.time())}")
+            try:
+                broker.submit_single(o["symbol"], qty, "buy" if short else "sell",
+                                     "buy_to_close" if short else "sell_to_close", px,
+                                     client_order_id_for("flat", o["symbol"]))
+            except Exception as e:              # noqa: BLE001
+                log.error("unpaired %s: close failed: %s", o.get("symbol"), e)
+    flatten_stock(broker, stocks, today)
     db.heartbeat("warning", f"{today}: emergency close-all run")
     return 0
 
@@ -506,13 +830,18 @@ def health() -> int:
     line("env file", C.ENV_PATH.exists() or None, str(C.ENV_PATH) + ("" if C.ENV_PATH.exists() else " missing"))
     try:
         C.trading_creds(env)
-        line("trading keys", True, "OPT_APCA_* present, paper flag true, paper URL")
+        line("trading keys", True, "OPT_APCA_* present, paper flag true, paper URL, not the shorting bot's key")
     except C.ConfigError as e:
         line("trading keys", None, f"{e} (dry runs still work)")
+    ident = C.shorting_identity()
+    line("shorting acct", True if ident["account_ids"] else None,
+         "shorting account id configured for the same-account check" if ident["account_ids"] else
+         "set SHORTING_ACCOUNT_ID (or _NUMBER) in Options Bot/.env so the bot can refuse the shorting account "
+         "(the key check is always on)")
     try:
         b = Broker(execute=False, env=env)
         line("data keys", True, f"source: {b.data_creds.source}")
-    except Exception as e:
+    except Exception as e:                      # noqa: BLE001
         line("data keys", False, str(e))
         return 1
     if b.has_trading:
@@ -530,10 +859,11 @@ def health() -> int:
         line("stock data", s["price"] is not None, f"SPY {s['price']} ({s['feed']}, bar {s['bar_date']})")
         ch = b.option_chain("SPY", today + dt.timedelta(days=C.DTE_MIN), today + dt.timedelta(days=C.DTE_MAX))
         line("option chain", len(ch) > 0, f"{len(ch)} SPY puts 7-14 DTE, {sum(q.delta is not None for q in ch)} with greeks")
-    except Exception as e:
+    except Exception as e:                      # noqa: BLE001
         line("market data", False, str(e))
     v = signals.vix_levels(today)
-    line("VIX", v["vix"] is not None and v["vix3m"] is not None, f"{v['vix']} / {v['vix3m']} ({v['source']})")
+    line("VIX", v["vix"] is not None and v["vix3m"] is not None,
+         f"{v['vix']} / {v['vix3m']} ({v['source']}){'' if v['fresh'] else ' NOT FRESH: entries would be blocked'}")
     line("supabase", True if db.enabled() else None, "enabled" if db.enabled() else "not configured (writes are no-ops)")
     rec = state.load_positions()
     line("state", True, f"{len(rec)} stored spreads in {C.STATE_DIR}")
@@ -547,39 +877,42 @@ def main(argv=None) -> int:
     ap.add_argument("--check", action="store_true", help="health check")
     ap.add_argument("--close-all", action="store_true", help="emergency: close every spread")
     ap.add_argument("--intraday", action="store_true", help="take-profit / stop checks only")
+    ap.add_argument("--sweep", action="store_true",
+                    help="expiry-day morning sweep: close spreads expiring today, flatten assigned stock")
     ap.add_argument("--force", action="store_true", help="allow a second executed daily run today")
     ap.add_argument("--symbols", help="comma-separated override of the universe")
     ap.add_argument("--preview", action="store_true",
                     help="also pick and price the spread for symbols without a signal (display only)")
     args = ap.parse_args(argv)
+    args._lock = None
     setup_logging()
     if args.check:
         return health()
-    lock = None
+    kind = "close-all" if args.close_all else "sweep" if args.sweep else "intraday" if args.intraday else "daily"
     try:
-        if args.execute:
-            C.STATE_DIR.mkdir(parents=True, exist_ok=True)
-            lock = open(C.STATE_DIR / ".lock", "w")
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                log.error("another executing run holds the lock; exiting")
-                return 1
         if args.close_all:
             return run_close_all(args)
+        if args.sweep:
+            return run_intraday(args, "sweep")
         if args.intraday:
-            return run_intraday(args)
+            return run_intraday(args, "intraday")
         return run_daily(args)
+    except LockBusy as e:
+        lvl = "warning" if kind == "intraday" else "error"
+        log.error("%s run not started: %s", kind, e)
+        db.heartbeat(lvl, f"{now_et():%Y-%m-%d %H:%M} {kind} run skipped: {e}")
+        return 1
     except (C.ConfigError, SafetyError) as e:
         log.error("REFUSED: %s", e)
+        db.heartbeat("error", f"{kind} refused: {e}")
         return 2
-    except Exception as e:
+    except Exception as e:                      # noqa: BLE001
         log.error("run failed: %s\n%s", e, traceback.format_exc())
-        db.heartbeat("error", f"run failed: {e}")
+        db.heartbeat("error", f"{kind} run failed: {e}")
         return 1
     finally:
-        if lock:
-            lock.close()
+        if args._lock:
+            args._lock.close()
 
 
 if __name__ == "__main__":

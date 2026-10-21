@@ -13,6 +13,8 @@ import logging
 import math
 import sys
 
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 import requests
@@ -25,6 +27,11 @@ if str(C.ROOT) not in sys.path:
 from optionsbot import indicators as ind  # noqa: E402
 
 log = logging.getLogger("optionslive")
+ET = ZoneInfo(C.MARKET_TZ)
+
+
+class DataError(RuntimeError):
+    """Missing / stale input data. Callers fail closed (no entry)."""
 HISTORY_DAYS = 420          # calendar days of daily bars (>= 200 sessions + warm-up)
 
 
@@ -48,13 +55,38 @@ def compute(symbol: str, bars: pd.DataFrame) -> Signal:
     return Signal(symbol, float(c.iloc[-1]), f(s200), f(s5), f(rsi2), f(ibs), last.date())
 
 
-def live_bar(broker, symbol: str, today: dt.date) -> dict:
+def check_history(symbol: str, hist: pd.DataFrame, today: dt.date) -> None:
+    """Fail closed when the prior daily bars are too short, stale, or broken."""
+    if hist is None or len(hist) < C.MIN_HISTORY_BARS:
+        raise DataError(f"{symbol}: only {0 if hist is None else len(hist)} daily bars "
+                        f"(need {C.MIN_HISTORY_BARS})")
+    last = hist.index[-1].date()
+    if last >= today:
+        raise DataError(f"{symbol}: history already contains {last} (expected bars before {today})")
+    if (today - last).days > C.MAX_HISTORY_GAP_DAYS:
+        raise DataError(f"{symbol}: last daily bar {last} is more than {C.MAX_HISTORY_GAP_DAYS} days old")
+    tail = hist[["open", "high", "low", "close"]].iloc[-(C.TREND_SMA + 1):]
+    if not np.isfinite(tail.to_numpy(dtype=float)).all() or (tail.to_numpy(dtype=float) <= 0).any():
+        raise DataError(f"{symbol}: missing or non-positive values in the last {len(tail)} daily bars")
+
+
+def live_bar(broker, symbol: str, today: dt.date, now: dt.datetime | None = None,
+             max_trade_age: float | None = None) -> dict:
     """Today's open/high/low so far and the live price. Combines the live
     snapshot (IEX on the free plan) with delayed SIP minute bars so the range
-    is not narrower than the consolidated tape."""
+    is not narrower than the consolidated tape. With ``max_trade_age`` the last
+    trade must be at most that many seconds old (fail closed)."""
     snap = broker.stock_snapshot(symbol)
     if snap["bar_date"] != today or snap["price"] is None:
-        raise RuntimeError(f"{symbol}: no live bar for {today} (snapshot bar {snap['bar_date']})")
+        raise DataError(f"{symbol}: no live bar for {today} (snapshot bar {snap['bar_date']})")
+    if max_trade_age is not None:
+        tt = snap.get("trade_time")
+        now = now or dt.datetime.now(ET)
+        if tt is None:
+            raise DataError(f"{symbol}: live trade has no timestamp (fail closed)")
+        age = (now - tt).total_seconds()
+        if age > max_trade_age:
+            raise DataError(f"{symbol}: last trade is {age:.0f}s old (> {max_trade_age:.0f}s)")
     o, h, l, px = snap["open"], snap["high"], snap["low"], snap["price"]
     src = snap["feed"]
     sip = broker.sip_intraday_range(symbol, today)
@@ -66,10 +98,13 @@ def live_bar(broker, symbol: str, today: dt.date) -> dict:
             "trade_time": snap["trade_time"]}
 
 
-def signal_for(broker, symbol: str, today: dt.date, hist: pd.DataFrame | None = None) -> tuple[Signal, pd.DataFrame, dict]:
+def signal_for(broker, symbol: str, today: dt.date, hist: pd.DataFrame | None = None,
+               now: dt.datetime | None = None, max_trade_age: float | None = None
+               ) -> tuple[Signal, pd.DataFrame, dict]:
     if hist is None:
         hist = broker.daily_bars(symbol, today - dt.timedelta(days=HISTORY_DAYS), today - dt.timedelta(days=1))
-    lb = live_bar(broker, symbol, today)
+    check_history(symbol, hist, today)
+    lb = live_bar(broker, symbol, today, now=now, max_trade_age=max_trade_age)
     bars = with_today(hist, today, lb["open"], lb["high"], lb["low"], lb["close"])
     return compute(symbol, bars), bars, lb
 
@@ -103,34 +138,51 @@ def _history_last(sym: str) -> tuple[float, dt.date] | None:
     return float(df["CLOSE"].iloc[-1]), d
 
 
+def _parse_cboe_ts(js: dict, d: dict) -> dt.datetime:
+    raw = d.get("last_trade_time") or js["timestamp"].replace(" ", "T")
+    ts = dt.datetime.fromisoformat(raw)
+    return ts.replace(tzinfo=ET) if ts.tzinfo is None else ts.astimezone(ET)   # Cboe times are ET
+
+
 def _delayed_quote(sym: str) -> tuple[float, dt.datetime] | None:
     try:
         js = _cboe_get(C.CBOE_QUOTE.format(sym=sym)).json()
         d = js["data"]
         px = float(d["current_price"])
-        ts = dt.datetime.fromisoformat(d.get("last_trade_time") or js["timestamp"].replace(" ", "T"))
+        ts = _parse_cboe_ts(js, d)
         return (px, ts) if px > 0 else None
     except Exception as e:
         log.warning("Cboe delayed quote %s failed: %s", sym, e)
         return None
 
 
-def vix_levels(today: dt.date) -> dict:
-    """VIX and VIX3M: today's delayed quote if it is from today, else the most
-    recent daily close (no older than 5 days, as in the backtest ffill)."""
+def vix_levels(today: dt.date, now: dt.datetime | None = None) -> dict:
+    """VIX and VIX3M. Entries need ``fresh``: both from Cboe's delayed quote,
+    both from today and at most C.VIX_MAX_AGE_MINUTES old. Otherwise the most
+    recent daily close (no older than 7 days) is reported for display / exits,
+    and ``fresh`` is False, so the kill switch blocks entries (fail closed)."""
+    now = now or dt.datetime.now(ET)
     out = {}
+    why = []
     for sym in ("VIX", "VIX3M"):
         q = _delayed_quote(sym)
-        if q and q[1].date() == today:
-            out[sym] = (q[0], f"cboe delayed {q[1]:%Y-%m-%d %H:%M}")
-            continue
+        if q:
+            age = (now - q[1]).total_seconds() / 60
+            if q[1].date() == today and age <= C.VIX_MAX_AGE_MINUTES:
+                out[sym] = (q[0], f"cboe delayed {q[1]:%Y-%m-%d %H:%M}", "delayed")
+                continue
+            why.append(f"{sym} quote {q[1]:%Y-%m-%d %H:%M} is {age:.0f} min old")
+        else:
+            why.append(f"{sym} delayed quote unavailable")
         h = _history_last(sym)
         if h and (today - h[1]).days <= 7:
-            out[sym] = (h[0], f"cboe close {h[1]}")
+            out[sym] = (h[0], f"cboe close {h[1]}", "close")
         else:
-            out[sym] = (None, "unavailable")
+            out[sym] = (None, "unavailable", None)
     vix, v3 = out["VIX"][0], out["VIX3M"][0]
-    return {"vix": vix, "vix3m": v3, "ratio": (vix / v3) if vix and v3 else None,
+    fresh = out["VIX"][2] == "delayed" and out["VIX3M"][2] == "delayed"
+    return {"vix": vix, "vix3m": v3, "ratio": (vix / v3) if vix and v3 else None, "fresh": fresh,
+            "stale_reason": "; ".join(why),
             "source": f"VIX {out['VIX'][1]}; VIX3M {out['VIX3M'][1]}"}
 
 

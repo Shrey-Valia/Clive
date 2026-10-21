@@ -21,7 +21,7 @@ from live import config as C  # noqa: E402
 from live import db, state  # noqa: E402
 from live import strategy as S  # noqa: E402
 from live.broker import ET, Broker  # noqa: E402
-from live.run import log, setup_logging  # noqa: E402
+from live.run import TRADE_COLS, log, setup_logging  # noqa: E402
 
 
 def spread_rows(broker: Broker, records: dict, now: dt.datetime) -> list[dict]:
@@ -30,7 +30,7 @@ def spread_rows(broker: Broker, records: dict, now: dt.datetime) -> list[dict]:
     rows = []
     for sid, r in records.items():
         sq, lq = quotes.get(r["short_symbol"]), quotes.get(r["long_symbol"])
-        mark = round(sq.mid - lq.mid, 4) if sq and lq and sq.valid and lq.valid else None
+        mark = S.exit_prices(sq, lq)[0]
         width = r["short_strike"] - r["long_strike"]
         credit, qty = float(r["entry_credit"]), int(r["qty"])
         rows.append({"bot_id": C.BOT_ID, "spread_id": sid, "underlying": r["underlying"], "expiry": r["expiry"],
@@ -68,7 +68,8 @@ def main() -> int:
         rows = spread_rows(broker, records, now)
         db.delete("options_live_positions", {"bot_id": C.BOT_ID})
         db.insert("options_live_positions", rows)
-        trades = [t for t in state.read_jsonl(state.TRADES) if t.get("exit_reason") != "external"]
+        trades = [{k: t.get(k) for k in TRADE_COLS} for t in state.read_jsonl(state.TRADES)
+                  if t.get("pnl") is not None and t.get("id")]          # external closes with a known P&L too
         db.insert("options_live_trades", trades, upsert_on="id")
         msg = (f"{today}: synced, equity ${acct['equity']:,.2f}, {len(rows)} spreads"
                + (f", {len(orphans)} UNPAIRED legs" if orphans else ""))

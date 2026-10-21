@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 LIVE_DIR = Path(__file__).resolve().parent
 ROOT = LIVE_DIR.parent                                   # "Options Bot/"
@@ -29,17 +30,20 @@ STATE_DIR = LIVE_DIR / "state"
 CACHE_DIR = LIVE_DIR / ".cache"
 
 BOT_ID = "options"
+ORDER_PREFIX = BOT_ID + "-"     # every client_order_id the bot sends starts with this; only these are canceled
 STRATEGY_ID = "dip_pcs_live"
 MARKET_TZ = "America/New_York"
 
 # ---------------------------------------------------------------- endpoints
 PAPER_TRADING_URL = "https://paper-api.alpaca.markets"
+PAPER_TRADING_HOST = "paper-api.alpaca.markets"
 LIVE_TRADING_HOST = "api.alpaca.markets"                 # refused, always
 DATA_URL = "https://data.alpaca.markets"
 STOCK_FEED = os.environ.get("OPT_STOCK_FEED", "iex")    # live price/snapshot feed ("sip" needs a paid plan)
 HIST_FEED = "sip"                                        # daily bars before today (free plans allow SIP > 15 min old)
 OPTION_FEED = "indicative"                               # free option feed; "opra" needs the OPRA agreement
 REQUEST_TIMEOUT = 20
+HTTP_RETRIES = 4                # 429 / 5xx / network errors on idempotent calls
 CBOE_HISTORY = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{sym}_History.csv"
 CBOE_QUOTE = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_{sym}.json"
 
@@ -60,7 +64,9 @@ LONG_DELTA = 0.10
 DTE_MIN, DTE_MAX, DTE_TARGET = 7, 14, 10
 TAKE_PROFIT = 0.50              # buy back when 50% of the credit is captured
 MAX_HOLD_DAYS = 5               # trading days
-STOP_MULT: float | None = None  # e.g. 2.0 = close when cost to close >= 2x credit. Off in research.
+# Research semantics (strategies.credit_exit sl_mult): close when cost to close >= credit * (1 + STOP_MULT),
+# e.g. 1.0 = the spread has doubled against us. Off in research.
+STOP_MULT: float | None = None
 CLOSE_DTE_TRADING_DAYS = 1      # close on the last trading day before expiry
 
 # ---------------------------------------------------------------- guards
@@ -88,12 +94,26 @@ DRY_RUN_EQUITY = 10_000.0       # used when no options account exists yet (dry r
 VIX_RATIO_MAX = 1.15            # no entries when VIX / VIX3M > 1.15
 VIX_MAX = 40.0                  # ... or VIX > 40
 KILL_ON_MISSING_VIX = True      # fail closed: no entries if VIX data is unavailable
+VIX_MAX_AGE_MINUTES = 30        # entries need same-day, same-source VIX and VIX3M quotes at most this old
+
+# ---------------------------------------------------------------- data freshness (fail closed)
+MIN_HISTORY_BARS = TREND_SMA + 5    # daily bars needed before today
+MAX_HISTORY_GAP_DAYS = 5            # last daily bar must be at most this many calendar days before today
+MAX_STOCK_TRADE_AGE_SECONDS = 300   # live price older than this blocks entries (execute mode)
+MAX_OPTION_QUOTE_AGE_SECONDS = 900  # option quotes older than this block entries / take-profits
 
 # ---------------------------------------------------------------- timing (minutes before the close)
-START_MINUTES_BEFORE_CLOSE = 15     # cron 15:45
-DECIDE_MINUTES_BEFORE_CLOSE = 10    # signals + exits at 15:50
+# DECIDE_MINUTES_BEFORE_CLOSE is the signal snapshot time. See live/README.md "Decision time" and
+# tuning/live_timing/ for the re-validation at 15:45 / 15:50 / 15:55 / 15:56 / close.
+START_MINUTES_BEFORE_CLOSE = 15     # cron 15:45: start, checks, startup sweep; then wait for the decision time
+# 15:55 (was 15:50): tuning/live_timing re-validation. At 15:50 the live rule kept 35 of 53 research
+# trades (IS Sharpe 0.52 vs 0.76 at the close); at 15:55 it keeps 45 (IS 0.74, OOS 1.89 vs 1.54).
+DECIDE_MINUTES_BEFORE_CLOSE = 5     # signals + exits at 15:55 (12:55 on half days)
 CUTOFF_MINUTES_BEFORE_CLOSE = 2     # cancel working orders by 15:58
 INTRADAY_START_MINUTES_AFTER_OPEN = 30
+LOCK_TIMEOUT_SECONDS = 240          # the daily run waits this long for an intraday run to release the lock
+EXPIRY_SWEEP_MINUTES_AFTER_OPEN = 15    # --sweep: expiry-day morning sweep (Alpaca starts its own
+                                        # expiration handling at 15:30 ET on expiration day)
 
 # ---------------------------------------------------------------- order working
 ENTRY_STEPS = 4                 # re-price up to N times (N+1 prices in total)
@@ -101,7 +121,7 @@ ENTRY_MAX_CONCESSION = 0.50     # walk at most this far from mid toward the natu
 EXIT_STEPS = 4
 EXIT_MAX_CONCESSION = 1.00      # exits walk all the way to the natural price ...
 EXIT_CUTOFF_EXTRA = 0.05        # ... and at the cutoff pay natural + $0.05 (aggressive fallback)
-STEP_WAIT_SECONDS = 90          # max time each price stays working (shrunk to fit the window)
+STEP_WAIT_SECONDS = 30          # max time each price stays working (5 prices fit 15:55-15:58; shrunk if needed)
 POLL_SECONDS = 3
 TICK = 0.01
 
@@ -160,13 +180,51 @@ def trading_creds(env: dict | None = None) -> Creds:
     assert_paper_url(base)
     if key.startswith("AK"):
         raise ConfigError("OPT_APCA_API_KEY_ID looks like a LIVE key (AK...). Paper keys start with PK.")
+    assert_not_shorting_key(key)
     return Creds(key, secret, "options")
 
 
 def assert_paper_url(url: str) -> None:
-    u = url.lower().rstrip("/")
-    if "paper-api.alpaca.markets" not in u:
+    """Exact host + https. A substring match would accept e.g. paper-api.alpaca.markets.evil.com."""
+    try:
+        u = urlparse(str(url).strip())
+        host, port = (u.hostname or "").lower(), u.port
+    except ValueError:
+        host, port, u = "", None, None
+    if (u is None or u.scheme != "https" or host != PAPER_TRADING_HOST or port not in (None, 443)
+            or u.username or u.password or (u.path or "").strip("/")):
         raise ConfigError(f"Trading base URL is not the paper endpoint ({url!r}); refusing.")
+
+
+def shorting_identity(path: Path | None = None) -> dict:
+    """The Stock Shorting Bot's key id and (optional) account id/number, for the
+    'never the same account' check. Values are only compared, never logged.
+    The account id comes from SHORTING_ACCOUNT_ID / SHORTING_ACCOUNT_NUMBER in
+    Options Bot/.env (or the shorting .env); the shorting keys themselves are
+    never sent to the trading host to look it up."""
+    sh = _read_env_file(path or SHORTING_ENV_PATH)
+    mine = _read_env_file(ENV_PATH)
+    ids = set()
+    for k in ("SHORTING_ACCOUNT_ID", "SHORTING_ACCOUNT_NUMBER", "APCA_ACCOUNT_ID", "APCA_ACCOUNT_NUMBER"):
+        for src in (sh, mine, os.environ):
+            v = str(src.get(k, "") or "").strip()
+            if v:
+                ids.add(v)
+    return {"key": sh.get("APCA_API_KEY_ID", "").strip(), "account_ids": ids}
+
+
+def assert_not_shorting_key(key: str, ident: dict | None = None) -> None:
+    ident = shorting_identity() if ident is None else ident
+    if ident.get("key") and key.strip() == ident["key"]:
+        raise ConfigError("OPT_APCA_API_KEY_ID is the Stock Shorting Bot's key. The options bot needs its own "
+                          "paper account; refusing.")
+
+
+def assert_not_shorting_account(account: dict, ident: dict | None = None) -> None:
+    ident = shorting_identity() if ident is None else ident
+    mine = {str(account.get(k, "") or "").strip() for k in ("id", "account_number")} - {""}
+    if mine & set(ident.get("account_ids") or ()):
+        raise ConfigError("The OPT keys point at the Stock Shorting Bot's account; refusing.")
 
 
 def data_creds(env: dict | None = None) -> Creds:

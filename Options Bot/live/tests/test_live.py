@@ -311,7 +311,9 @@ def test_exit_time_and_expiry():
 
 def test_exit_stop_optional():
     assert S.exit_reason(**{**BASE, "cost_to_close": 2.5}) is None                 # off by default
-    assert S.exit_reason(**{**BASE, "cost_to_close": 2.0, "stop_mult": 2.0}) == "stop_loss"
+    # research semantics (strategies.credit_exit): stop when cost >= credit * (1 + sl_mult)
+    assert S.exit_reason(**{**BASE, "cost_to_close": 2.9, "stop_mult": 2.0}) is None
+    assert S.exit_reason(**{**BASE, "cost_to_close": 3.0, "stop_mult": 2.0}) == "stop_loss"
 
 
 def test_intraday_only_price_rules():
@@ -381,7 +383,7 @@ def test_order_canceled_by_cutoff():
     clk = FakeClock()
     cutoff = clk.now() + dt.timedelta(minutes=8)
     j = _job([1.34, 1.32, 1.30, 1.28, 1.26, 1.24, 1.22])
-    execution.work_orders(fb, [j], cutoff=cutoff, clock=clk)          # default step: fits the window
+    execution.work_orders(fb, [j], cutoff=cutoff, clock=clk, step_wait=120)   # step shrunk to fit the window
     assert j.status == "unfilled" and fb.log[-1][0] == "cancel"
     assert cutoff - dt.timedelta(seconds=5) <= clk.now() <= cutoff + dt.timedelta(seconds=10)
 
