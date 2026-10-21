@@ -1,0 +1,55 @@
+event,date,source
+FOMC,2024-01-31,federalreserve.gov fomccalendars.htm
+FOMC,2024-03-20,federalreserve.gov fomccalendars.htm
+FOMC,2024-05-01,federalreserve.gov fomccalendars.htm
+FOMC,2024-06-12,federalreserve.gov fomccalendars.htm
+FOMC,2024-07-31,federalreserve.gov fomccalendars.htm
+FOMC,2024-09-18,federalreserve.gov fomccalendars.htm
+FOMC,2024-11-07,federalreserve.gov fomccalendars.htm
+FOMC,2024-12-18,federalreserve.gov fomccalendars.htm
+FOMC,2025-01-29,federalreserve.gov fomccalendars.htm
+FOMC,2025-03-19,federalreserve.gov fomccalendars.htm
+FOMC,2025-05-07,federalreserve.gov fomccalendars.htm
+FOMC,2025-06-18,federalreserve.gov fomccalendars.htm
+FOMC,2025-07-30,federalreserve.gov fomccalendars.htm
+FOMC,2025-09-17,federalreserve.gov fomccalendars.htm
+FOMC,2025-10-29,federalreserve.gov fomccalendars.htm
+FOMC,2025-12-10,federalreserve.gov fomccalendars.htm
+FOMC,2026-01-28,federalreserve.gov fomccalendars.htm
+FOMC,2026-03-18,federalreserve.gov fomccalendars.htm
+FOMC,2026-04-29,federalreserve.gov fomccalendars.htm
+FOMC,2026-06-17,federalreserve.gov fomccalendars.htm
+FOMC,2026-07-29,federalreserve.gov fomccalendars.htm
+FOMC,2026-09-16,federalreserve.gov fomccalendars.htm
+CPI,2024-02-13,bls.gov cpi archive
+CPI,2024-03-12,bls.gov cpi archive
+CPI,2024-04-10,bls.gov cpi archive
+CPI,2024-05-15,bls.gov cpi archive
+CPI,2024-06-12,bls.gov cpi archive
+CPI,2024-07-11,bls.gov cpi archive
+CPI,2024-08-14,bls.gov cpi archive
+CPI,2024-09-11,bls.gov cpi archive
+CPI,2024-10-10,bls.gov cpi archive
+CPI,2024-11-13,bls.gov cpi archive
+CPI,2024-12-11,bls.gov cpi archive
+CPI,2025-01-15,FRED release calendar rid=10
+CPI,2025-02-12,FRED release calendar rid=10
+CPI,2025-03-12,FRED release calendar rid=10
+CPI,2025-04-10,FRED release calendar rid=10
+CPI,2025-05-13,FRED release calendar rid=10
+CPI,2025-06-11,FRED release calendar rid=10
+CPI,2025-07-15,FRED release calendar rid=10
+CPI,2025-08-12,FRED release calendar rid=10
+CPI,2025-09-11,FRED release calendar rid=10
+CPI,2025-10-24,FRED release calendar rid=10 (shutdown-delayed)
+CPI,2025-12-18,FRED release calendar rid=10 (Oct-2025 CPI cancelled)
+CPI,2026-01-13,FRED release calendar rid=10
+CPI,2026-02-13,FRED release calendar rid=10
+CPI,2026-03-11,FRED release calendar rid=10
+CPI,2026-04-10,FRED release calendar rid=10
+CPI,2026-05-12,FRED release calendar rid=10
+CPI,2026-06-10,FRED release calendar rid=10
+CPI,2026-07-14,FRED release calendar rid=10
+CPI,2026-08-12,FRED release calendar rid=10
+CPI,2026-09-11,FRED release calendar rid=10
+CPI,2026-10-14,FRED release calendar rid=10

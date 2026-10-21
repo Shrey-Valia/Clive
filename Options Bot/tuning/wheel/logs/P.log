@@ -1,0 +1,36 @@
+pf_def_fixed_cap25 0.592 2.168 0.146 -0.175 {'AAPL': 46, 'AMZN': 33, 'GOOGL': 40, 'IWM': 44, 'NVDA': 6}
+pf_def_fixed_cap34 0.594 1.753 0.103 -0.145 {'AAPL': 46, 'AMZN': 33, 'IWM': 44}
+pf_def_fixed_cap50 0.782 1.588 0.124 -0.18 {'AAPL': 18, 'IWM': 44, 'QQQ': 28}
+pf_def_rotate_cap25 0.644 2.135 0.152 -0.19 {'AAPL': 47, 'AMZN': 27, 'GOOGL': 40, 'IWM': 32, 'NVDA': 33}
+pf_def_rotate_cap34 0.607 1.689 0.132 -0.175 {'AAPL': 14, 'AMZN': 29, 'GOOGL': 29, 'IWM': 22, 'MSFT': 5, 'NVDA': 23}
+pf_def_rotate_cap50 0.596 1.804 0.178 -0.191 {'AAPL': 25, 'AMZN': 17, 'GOOGL': 19, 'IWM': 6, 'META': 5, 'MSFT': 4, 'NVDA': 6, 'QQQ': 5}
+pf_def_trend_cap25 0.591 1.97 0.136 -0.176 {'AAPL': 46, 'AMZN': 33, 'GOOGL': 22, 'IWM': 41, 'NVDA': 21}
+pf_def_trend_cap34 0.583 2.121 0.115 -0.147 {'AAPL': 28, 'AMZN': 27, 'GOOGL': 36, 'IWM': 38}
+pf_def_trend_cap50 0.791 1.761 0.139 -0.18 {'AAPL': 9, 'AMZN': 11, 'IWM': 35, 'QQQ': 29}
+pf_def_mom_cap25 0.641 2.057 0.149 -0.19 {'AAPL': 38, 'AMZN': 32, 'GOOGL': 28, 'IWM': 36, 'NVDA': 38}
+pf_def_mom_cap34 0.815 1.598 0.148 -0.15 {'AAPL': 11, 'AMZN': 26, 'GOOGL': 33, 'IWM': 12, 'NVDA': 37}
+pf_def_mom_cap50 0.999 1.502 0.194 -0.184 {'AAPL': 2, 'AMZN': 26, 'GOOGL': 7, 'META': 9, 'NVDA': 35}
+pf_def_rv_high_cap25 0.671 1.964 0.151 -0.185 {'AAPL': 40, 'AMZN': 33, 'GOOGL': 43, 'IWM': 14, 'NVDA': 39}
+pf_def_rv_high_cap34 0.768 1.457 0.146 -0.164 {'AMZN': 33, 'GOOGL': 45, 'IWM': 5, 'NVDA': 39}
+pf_def_rv_high_cap50 0.779 1.527 0.18 -0.215 {'AMZN': 12, 'GOOGL': 27, 'META': 12, 'NVDA': 29}
+pf_def_rv_low_cap25 0.592 2.119 0.142 -0.175 {'AAPL': 46, 'AMZN': 27, 'GOOGL': 38, 'IWM': 44, 'NVDA': 16}
+pf_def_rv_low_cap34 0.536 1.866 0.121 -0.148 {'AAPL': 38, 'AMZN': 11, 'GOOGL': 25, 'IWM': 44, 'NVDA': 15}
+pf_def_rv_low_cap50 0.8 0.802 0.102 -0.18 {'AAPL': 3, 'IWM': 31, 'MSFT': 18, 'QQQ': 26}
+pf_is_fixed_cap25 0.623 2.106 0.165 -0.179 {'AAPL': 37, 'AMZN': 33, 'GOOGL': 39, 'IWM': 36, 'NVDA': 7}
+pf_is_fixed_cap34 0.611 1.82 0.125 -0.149 {'AAPL': 37, 'AMZN': 33, 'IWM': 36}
+pf_is_fixed_cap50 0.876 1.407 0.152 -0.187 {'IWM': 36, 'QQQ': 30}
+pf_is_rotate_cap25 0.708 2.075 0.175 -0.194 {'AAPL': 37, 'AMZN': 33, 'GOOGL': 43, 'IWM': 29, 'MSFT': 1, 'NVDA': 19}
+pf_is_rotate_cap34 0.711 1.193 0.131 -0.177 {'AAPL': 15, 'AMZN': 25, 'GOOGL': 15, 'IWM': 22, 'MSFT': 5, 'NVDA': 22}
+pf_is_rotate_cap50 0.62 2.357 0.215 -0.197 {'AAPL': 25, 'AMZN': 17, 'GOOGL': 19, 'IWM': 5, 'META': 6, 'MSFT': 8, 'NVDA': 2, 'QQQ': 4}
+pf_is_trend_cap25 0.569 2.107 0.162 -0.181 {'AAPL': 37, 'AMZN': 33, 'GOOGL': 39, 'IWM': 36, 'NVDA': 7}
+pf_is_trend_cap34 0.584 1.82 0.124 -0.151 {'AAPL': 19, 'AMZN': 33, 'GOOGL': 15, 'IWM': 36}
+pf_is_trend_cap50 0.876 1.407 0.152 -0.187 {'IWM': 36, 'QQQ': 30}
+pf_is_mom_cap25 0.76 1.916 0.168 -0.194 {'AAPL': 36, 'AMZN': 32, 'GOOGL': 29, 'IWM': 23, 'NVDA': 39}
+pf_is_mom_cap34 0.795 1.024 0.129 -0.18 {'AAPL': 15, 'AMZN': 26, 'GOOGL': 22, 'IWM': 11, 'NVDA': 38}
+pf_is_mom_cap50 1.08 0.95 0.2 -0.19 {'AAPL': 2, 'AMZN': 12, 'GOOGL': 12, 'META': 21, 'NVDA': 27}
+pf_is_rv_high_cap25 0.734 2.0 0.169 -0.19 {'AAPL': 37, 'AMZN': 33, 'GOOGL': 39, 'IWM': 14, 'NVDA': 39}
+pf_is_rv_high_cap34 0.87 1.119 0.143 -0.166 {'AMZN': 33, 'GOOGL': 45, 'IWM': 5, 'NVDA': 39}
+pf_is_rv_high_cap50 0.899 1.338 0.202 -0.215 {'AMZN': 12, 'GOOGL': 27, 'META': 13, 'NVDA': 27}
+pf_is_rv_low_cap25 0.623 2.066 0.164 -0.179 {'AAPL': 37, 'AMZN': 33, 'GOOGL': 43, 'IWM': 36, 'NVDA': 4}
+pf_is_rv_low_cap34 0.589 1.879 0.135 -0.151 {'AAPL': 37, 'AMZN': 14, 'GOOGL': 15, 'IWM': 36, 'MSFT': 5, 'NVDA': 4}
+pf_is_rv_low_cap50 0.922 1.407 0.155 -0.185 {'AAPL': 2, 'IWM': 32, 'QQQ': 30}

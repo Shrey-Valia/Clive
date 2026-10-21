@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 results/runs.json
+tuning/signals/cache/
+tuning/events/raw/
+tuning/wheel/runs/
+*.pkl

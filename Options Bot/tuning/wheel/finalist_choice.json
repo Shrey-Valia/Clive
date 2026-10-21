@@ -1,0 +1,123 @@
+{
+ "finalists": [
+  {
+   "id": "F1_wheel_qqq",
+   "name": "Wheel 0.30d put / 0.15d call, 30-45 DTE, put TP50, roll tested calls",
+   "kind": "single",
+   "strategy": "wheel_x",
+   "underlying": "QQQ",
+   "capital": 100000,
+   "selected_config": "whB_is_croll",
+   "families": [
+    "wheel_core",
+    "wheel_mgmt",
+    "wheel_combo"
+   ],
+   "params": {
+    "put_delta": 0.3,
+    "call_delta": 0.15,
+    "dte_min": 30,
+    "dte_max": 45,
+    "dte_target": 38,
+    "put_tp": 0.5,
+    "call_roll_tested": true,
+    "roll_trigger_dte": 7,
+    "max_rolls": 3
+   },
+   "alt_capitals": [
+    50000,
+    10000
+   ],
+   "alt_symbol": {
+    "50000": "IWM",
+    "10000": "NVDA"
+   }
+  },
+  {
+   "id": "F2_cc_qqq",
+   "name": "Covered call 0.40d, 30-45 DTE, held to expiry (physical call-away, re-buy)",
+   "kind": "single",
+   "strategy": "wheel_x",
+   "underlying": "QQQ",
+   "capital": 100000,
+   "selected_config": "cc_c40_d30_hold",
+   "families": [
+    "covered_call"
+   ],
+   "params": {
+    "entry": "stock",
+    "put_tp": null,
+    "call_delta": 0.4,
+    "dte_min": 30,
+    "dte_max": 45,
+    "dte_target": 38
+   },
+   "alt_capitals": [
+    50000,
+    10000
+   ],
+   "alt_symbol": {
+    "50000": "IWM",
+    "10000": "NVDA"
+   }
+  },
+  {
+   "id": "F3_collar_spy",
+   "name": "Collar: 0.25d 75-120 DTE put (roll 30 DTE) + 0.30d 30-45 DTE call (roll 21 DTE)",
+   "kind": "single",
+   "strategy": "collar_x",
+   "underlying": "SPY",
+   "capital": 100000,
+   "selected_config": "col_p25_c30_put90",
+   "families": [
+    "collar"
+   ],
+   "params": {
+    "put_delta": 0.25,
+    "call_delta": 0.3,
+    "dte_min": 30,
+    "dte_max": 45,
+    "dte_target": 38,
+    "put_dte_min": 75,
+    "put_dte_max": 120,
+    "put_dte_target": 90,
+    "put_roll_dte": 30
+   },
+   "alt_capitals": [
+    50000,
+    10000
+   ],
+   "alt_symbol": {
+    "50000": "IWM",
+    "10000": "NVDA"
+   }
+  },
+  {
+   "id": "P1_wheel_portfolio",
+   "name": "Shared-cash wheel, 8 names, 12-1 momentum rank, 50% per-name cap",
+   "kind": "portfolio",
+   "strategy": "wheel_x",
+   "underlying": "QQQ,IWM,AAPL,AMZN,GOOGL,META,NVDA,MSFT",
+   "capital": 100000,
+   "selected_config": "pf_is_mom_cap50",
+   "families": [
+    "portfolio"
+   ],
+   "params": {
+    "put_delta": 0.3,
+    "call_delta": 0.15,
+    "dte_min": 30,
+    "dte_max": 45,
+    "dte_target": 38,
+    "put_tp": 0.5
+   },
+   "pkw": {
+    "rank": "mom",
+    "cap_frac": 0.5
+   },
+   "alt_capitals": [
+    50000
+   ]
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+# Issues found in shared code (not edited; documented here)
+
+1. **`pricing.DIV_YIELD` has no TSLA or NFLX entry** (`optionsbot/pricing.py`). `div_yield()` falls back to 1%, but neither stock pays a dividend. IV inversion and model marks for those two names therefore assume a 1% yield. The effect on 1-5 DTE earnings options is negligible: it biases call/put IV by roughly 1 vol point at most and has no effect on straddle-based implied moves, which use raw closes. A 30-45 DTE engine run on TSLA/NFLX would see a slightly larger bias. Fix: add `"TSLA": 0.0, "NFLX": 0.0`.
+
+2. **`data._bars_to_series` drops the bar volume.** `option_bars` caches `{t, c, v}`, but it returns only closes. So `Market.select` / `Engine._mark` cannot enforce a volume > 0 rule, and "printed" means only "a bar exists". `strategies_events.EventData.load` reads `v` back from the same cache file instead. In practice every Alpaca bar seen here had v > 0, so the existing behaviour matches, but the dependency is implicit.
+
+3. **The `Market.bars` cache key depends on `Market.end`** (`end = min(exp, self.end)`). Bars for any contract expiring after the end date passed to `runner.market()` are cached under a key frozen at that end. If one agent later builds a Market with a different end, those bars are re-fetched under a new key: duplicate requests, but no wrong data. Expired contracts are unaffected, which covers everything in this study.
+
+4. **EDGAR timestamp convention (research note vs brief).** The tasking brief says `acceptanceDateTime` is "ET wall time despite the Z". Checked against the research note's verified index-page examples, it is not: true ET = `to_ET(ts) + utcoffset` (for example JSON `2026-07-31T00:30:28Z` is 2026-07-30 16:30:28 ET). Reading it naively as ET would have put every AAPL report one calendar day late. `earnings_dates.py` uses the verified formula, and the extracted dates match the research table exactly.
+
+5. **Monthly vs weekly strike grids.** Half-dollar strikes (e.g. AAPL 217.5) exist on weeklies but are often unlisted or unprinted on the monthly. A same-strike calendar that keys off the weekly ATM strike therefore fails silently. Any shared calendar or diagonal code should choose the strike from the intersection of printed strikes on both expiries. `strategies_events.EarningsCalendar` does this.

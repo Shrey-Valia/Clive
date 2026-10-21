@@ -1,0 +1,1 @@
+{"id":"wh_p30_c15_d30_tp50","params":{"put_delta":0.30,"call_delta":0.15,"dte_min":30,"dte_max":45,"dte_target":38,"put_tp":0.5},"rule":"highest IS basket Sharpe averaged with its delta-grid neighbours (plateau score)"}
