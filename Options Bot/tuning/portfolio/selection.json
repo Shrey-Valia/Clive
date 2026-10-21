@@ -1,0 +1,18 @@
+{
+ "rules": {
+  "10k": "max IS Sharpe among the 16-trial grid with IS max DD >= -20%",
+  "10k_alt": "max IS Sharpe among spreads-only (idle cash) grid rows, IS max DD >= -20%",
+  "100k": "max IS Sharpe among engine-implemented (whole-lot) blends with no infeasible sleeve and IS max DD >= -15%"
+ },
+ "picked": {
+  "10k_primary": "10k_B_core80_overlay",
+  "10k_alt_spreads_only": "10k_A_cap25_cash",
+  "100k_primary": "100k_L_collar_SPY60_erc40_engine",
+  "100k_alt": "100k_L_cc_QQQ60_erc40_engine"
+ },
+ "n_trials": {
+  "10000": 18,
+  "100000": 13
+ },
+ "upstream_trials": 1884
+}

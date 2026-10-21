@@ -11,6 +11,8 @@ IMAGES = {
     "IMG_WHEEL": "tuning/wheel/out/F1_wheel_qqq_equity_dd.png",
     "IMG_LONGHIST": "longhist/out/equity_log.png",
     "IMG_SPREADS": "tuning/spreads/out/finalists.png",
+    "IMG_P10K": "tuning/portfolio/out/equity_10k.png",
+    "IMG_STRESS": "tuning/portfolio/out/stress_bars.png",
 }
 
 html = open(os.path.join(HERE, "brief.template.html")).read()

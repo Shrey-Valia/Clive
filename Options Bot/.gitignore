@@ -8,3 +8,4 @@ tuning/signals/cache/
 tuning/events/raw/
 tuning/wheel/runs/
 *.pkl
+tuning/portfolio/cache/

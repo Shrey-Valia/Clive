@@ -173,6 +173,21 @@ footer { max-width: 1120px; margin: 0 auto; border-top: 1px solid var(--rule); p
   <figcaption>Spread finalists from the tuning run. Held-to-expiry condors had shallow drawdowns, and the RSI2 overlay (F3) degraded out of sample.</figcaption>
 </figure>
 
+<section class="col" id="portfolio">
+  <div class="eyebrow">Putting it together</div>
+  <h2>Portfolios for a $10k and a $100k account</h2>
+  <p>The finalists were combined in one shared-cash account. All choices were made on in-sample data and judged out of sample.</p>
+  <ul>
+    <li><b>$10k, highest return:</b> 80% SPY shares plus the dip put spread on the cash. 30.1% a year, Sharpe 1.47, max drawdown −13.5%. It beat SPY out of sample (Sharpe 1.58 vs 1.52). Its synthetic 2008-style crash loss is worse than SPY's (about −50% to −68% vs −47% to −57%), because the spreads add risk on top of the shares.</li>
+    <li><b>$10k, lowest risk:</b> dip put spreads only, total risk capped at 25%. 16.6% a year, max drawdown −10.4%, beta 0.24. Synthetic crash loss about −25% to −38%.</li>
+    <li><b>$100k:</b> $60k SPY collar, $12.7k dip put spread, $17.9k SPY iron condor and $9.5k SPY shares. 11.5% a year, Sharpe 1.72, max drawdown −4%. It beats SPY on risk but trails it by about 8 points a year.</li>
+    <li><b>Wheel and covered call are close to the same bet:</b> 0.95 correlation with each other and about 0.92 with SPY. The dip spreads are the only real diversifier, at about 0.2–0.3.</li>
+  </ul>
+</section>
+<div class="figs">
+  <figure><img src="{{IMG_P10K}}" alt="$10k portfolio candidates against SPY buy-and-hold, 2024 to 2026."><figcaption>$10k candidates against SPY.</figcaption></figure>
+  <figure><img src="{{IMG_STRESS}}" alt="Drawdowns of each portfolio in real and synthetic stress windows compared with SPY."><figcaption>Stress test. The GFC, COVID and 2022 bars are synthetic.</figcaption></figure>
+</div>
 <section class="col">
   <div class="eyebrow">Can the backtester be trusted?</div>
   <h2>Calibration and known limits</h2>
@@ -230,7 +245,7 @@ footer { max-width: 1120px; margin: 0 auto; border-top: 1px solid var(--rule); p
   <ol class="steps">
     <li>Review the shorting bot code and the dashboard on the branch, then merge or request changes.</li>
     <li>Create the Supabase project and run both migrations so the dashboard can go live on Vercel.</li>
-    <li>Pick which options strategy to paper-trade first. The recommendation is the dip put spread on SPY, because it fits $10k and it is the simplest to automate.</li>
+    <li>Create a second Alpaca paper account, add its keys to <code>Options Bot/.env</code> and run <code>python3 live/run.py --check</code>. The live dip put spread bot is built and tested and runs in dry-run mode until then.</li>
     <li>Decide whether to fix the engine bugs before any further tuning.</li>
   </ol>
 </section>
