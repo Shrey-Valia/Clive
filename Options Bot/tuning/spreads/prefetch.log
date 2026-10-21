@@ -1,0 +1,17 @@
+SPY expiries needing data: 286 symbols: 11437 ~requests: 294
+  SPY 20/286 requests so far 30 (20/min)
+  SPY 40/286 requests so far 52 (26/min)
+  SPY 60/286 requests so far 78 (27/min)
+  SPY 80/286 requests so far 103 (28/min)
+  SPY 100/286 requests so far 130 (29/min)
+  SPY 120/286 requests so far 164 (26/min)
+  SPY 140/286 requests so far 195 (25/min)
+  SPY 160/286 requests so far 223 (25/min)
+  SPY 180/286 requests so far 251 (24/min)
+  SPY 200/286 requests so far 276 (23/min)
+  SPY 220/286 requests so far 297 (24/min)
+  SPY 240/286 requests so far 324 (24/min)
+  SPY 260/286 requests so far 350 (24/min)
+  SPY 280/286 requests so far 371 (25/min)
+SPY done, requests 387
+QQQ expiries needing data: 288 symbols: 14416 ~requests: 306

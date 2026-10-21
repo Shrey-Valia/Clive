@@ -1,0 +1,66 @@
+[
+ {
+  "id": "F1_ic10_w3_60d_hold",
+  "name": "Iron condor 10d/3% wings/60 DTE hold (SPY)",
+  "underlying": "SPY",
+  "params": {
+   "structure": "ic",
+   "put_delta": 0.1,
+   "call_delta": 0.1,
+   "wing": "pct",
+   "width_pct": 0.03,
+   "dte_min": 50,
+   "dte_max": 70,
+   "dte_target": 60,
+   "tp": null,
+   "sl_mult": null,
+   "breach": false,
+   "close_dte": null,
+   "risk_frac": 0.2,
+   "max_positions": 1
+  }
+ },
+ {
+  "id": "F2_ic10_w3_60d_hold_port",
+  "name": "Iron condor 10d/3% wings/60 DTE hold (SPY+QQQ+IWM)",
+  "underlying": "PORT",
+  "params": {
+   "structure": "ic",
+   "put_delta": 0.1,
+   "call_delta": 0.1,
+   "wing": "pct",
+   "width_pct": 0.03,
+   "dte_min": 50,
+   "dte_max": 70,
+   "dte_target": 60,
+   "tp": null,
+   "sl_mult": null,
+   "breach": false,
+   "close_dte": null,
+   "risk_frac": 0.2,
+   "max_positions": 1
+  }
+ },
+ {
+  "id": "F3_pcs20_w3_60d_hold_rsi2ccs",
+  "name": "Put spread 20d/3%/60 DTE hold + RSI2>90 call spread (SPY)",
+  "underlying": "SPY",
+  "params": {
+   "structure": "pcs",
+   "put_delta": 0.2,
+   "call_delta": 0.2,
+   "wing": "pct",
+   "width_pct": 0.03,
+   "dte_min": 50,
+   "dte_max": 70,
+   "dte_target": 60,
+   "tp": null,
+   "sl_mult": null,
+   "breach": false,
+   "close_dte": null,
+   "risk_frac": 0.15,
+   "max_positions": 1,
+   "rsi2_ccs": true
+  }
+ }
+]

@@ -1,0 +1,241 @@
+<title>Clive Overnight Brief</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a terminal research note. One reading column (840px) for prose, tables and charts
+   break out to 1120px. Committed single dark world to match the Clive terminal. */
+:root {
+  color-scheme: dark;
+  --bg: #050607;
+  --panel: #0b0e11;
+  --rule: #222a31;
+  --amber: #ffa028;
+  --amber-dim: #9a6214;
+  --ink: #e9ebe6;
+  --text: #c3c8c3;
+  --dim: #7f8890;
+  --pos: #3ddc84;
+  --neg: #ff5a52;
+  --warn: #ffd23f;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --f-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.62 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 72px; }
+.top { border-bottom: 1px solid var(--rule); padding-block: 10px; display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center;
+  font: 600 12px var(--f-mono); letter-spacing: 0.06em; color: var(--dim); max-width: 1120px; margin: 0 auto; }
+.top .brand { background: var(--amber); color: #000; padding: 2px 8px; letter-spacing: 0.12em; }
+.top .fn { color: var(--amber); }
+main { max-width: 1120px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; padding-top: 40px; }
+.col { max-width: 840px; display: flex; flex-direction: column; gap: 16px; }
+h1, h2, h3 { margin: 0; color: var(--ink); text-wrap: balance; }
+h1 { font: 700 clamp(30px, 5vw, 44px)/1.08 var(--f-mono); letter-spacing: -0.02em; }
+h2 { font: 700 22px/1.2 var(--f-mono); }
+h3 { font: 600 16px/1.3 var(--f-mono); color: var(--amber); letter-spacing: 0.02em; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font: 600 11px var(--f-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); }
+.lede { font-size: 19px; color: var(--ink); max-width: 62ch; }
+code, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+code { color: var(--amber); }
+ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; max-width: 72ch; }
+li::marker { color: var(--amber-dim); }
+.pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); } .dim { color: var(--dim); }
+
+.verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+.verdicts > div { background: var(--panel); padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
+.verdicts b { font: 700 15px var(--f-mono); color: var(--ink); }
+.verdicts p { font-size: 14px; }
+
+.pill { display: inline-block; font: 700 10px/1 var(--f-mono); letter-spacing: 0.08em; padding: 4px 7px; border: 1px solid currentColor; white-space: nowrap; vertical-align: 2px; }
+.pill.go { color: var(--pos); } .pill.watch { color: var(--warn); } .pill.no { color: var(--neg); } .pill.info { color: var(--dim); }
+
+.scroll { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font: 13px/1.45 var(--f-mono); font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid #151b20; vertical-align: top; }
+th { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); border-bottom: 1px solid var(--amber-dim); white-space: nowrap; }
+td { color: var(--ink); }
+td.n, th.n { text-align: right; white-space: nowrap; }
+td.why { color: var(--text); font-family: var(--f-body); font-size: 13px; min-width: 240px; }
+tr:last-child td { border-bottom: 0; }
+caption { caption-side: bottom; text-align: left; padding: 8px 12px; font: 12px var(--f-body); color: var(--dim); }
+
+figure { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+figure img { width: 100%; height: auto; display: block; border: 1px solid var(--rule); }
+figcaption { font-size: 13px; color: var(--dim); max-width: 80ch; }
+.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; }
+
+.callout { border-left: 3px solid var(--amber); background: var(--panel); padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; max-width: 840px; }
+.callout.red { border-left-color: var(--neg); }
+.steps { counter-reset: s; list-style: none; padding: 0; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 2.2em 1fr; gap: 4px; }
+.steps li::before { content: counter(s) "."; font: 700 14px var(--f-mono); color: var(--amber); }
+footer { max-width: 1120px; margin: 0 auto; border-top: 1px solid var(--rule); padding-top: 14px; font-size: 13px; color: var(--dim); }
+@media (max-width: 520px) { .figs { grid-template-columns: 1fr; } td.why { min-width: 180px; } }
+</style>
+
+<div class="top"><span class="brand">CLIVE</span><span class="fn">BRIEF &lt;GO&gt;</span><span>OVERNIGHT RESEARCH · OCT 20–21, 2026</span><span>BRANCH overnight/terminal-options-research</span></div>
+<main>
+
+<section class="col">
+  <div class="eyebrow">Overnight research brief</div>
+  <h1>Clive Overnight Brief</h1>
+  <p class="lede">The dashboard is rebuilt as a working terminal. Options research covered 4 tracks, and 4 tuning agents tested about 500 strategy variants on real Alpaca option prices. All tuning was done on early data and judged only on data it never saw. In a strong bull market almost nothing beat simply holding the index.  A few changes did hold up, and they are listed below. The two best fits for a $10k account are a dip-timed SPY put spread and a far out-of-the-money SPY iron condor held to expiry.</p>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Read this first</div>
+  <h2>What to do with this</h2>
+  <div class="verdicts">
+    <div><span class="pill go">PAPER-TRADE</span><b>Dip put spread on SPY / QQQ / IWM</b><p>Sell a 7–14 day put spread after a sharp dip in an uptrend. Results: 93% win rate, out-of-sample Sharpe 1.01, and it works on a $10k account. It is in the market only about 27% of days.</p></div>
+    <div><span class="pill go">PAPER-TRADE</span><b>Wheel QQQ with 0.15Δ calls</b><p>Sell lower-delta calls and roll tested calls for a credit. Results: 17.5% a year with a Sharpe of 1.11, beating the old default out of sample. It needs about $60k or more for one QQQ lot.</p></div>
+    <div><span class="pill watch">WATCH</span><b>Covered call QQQ, hold to expiry</b><p>18.6% a year, Sharpe 1.22. The main gain comes from stopping the buyback of in-the-money calls at 21 DTE. It needs about $60k or more.</p></div>
+    <div><span class="pill go">PAPER-TRADE</span><b>SPY iron condor, held to expiry</b><p>0.10Δ shorts, 3% wings, about 60 days, no stops. Out-of-sample Sharpe 1.46, max drawdown −6.8%, beta about 0.3. Fits $10k as one contract. A full loss is possible but hasn't happened in the sample yet.</p></div>
+    <div><span class="pill no">DON'T</span><b>Earnings plays, 1-day condors, entry filters</b><p>Every earnings structure and every 1DTE SPY/QQQ condor lost money after costs. VIX, 200-day and volatility-premium entry gates did not help out of sample.</p></div>
+  </div>
+</section>
+
+<section class="col">
+  <div class="eyebrow">The core fact</div>
+  <h2>Options are usually overpriced, until they aren't</h2>
+  <p>From 2016 to 2026, VIX sat above SPY's actual volatility over the next 21 days on 85% of days, by about 3.8 points on average. That spread is the volatility risk premium, and it is the only edge in premium selling with solid evidence behind it. The cost of collecting it shows up in a few crashes: on 2020-02-20 realized volatility came in 63 points above what VIX implied.</p>
+</section>
+<figure>
+  <img src="{{IMG_VRP}}" alt="VIX versus realized SPY volatility over the next 21 days, 2016 to 2026, with the spread shown below: mostly positive, with sharp negative spikes in early 2018, March 2020 and April 2025.">
+  <figcaption>Implied volatility (amber) usually sits above realized volatility (white). The red spikes in the lower panel are the losses that wipe out premium sellers.</figcaption>
+</figure>
+
+<section class="col">
+  <div class="eyebrow">Results scoreboard</div>
+  <h2>Every finalist, judged on data it never saw</h2>
+  <p>In-sample (IS) runs from March 2024 to June 2025, and every parameter was chosen there. Out-of-sample (OOS) runs from July 2025 to October 2026, with parameters frozen. Costs are the engine default, which is conservative. Sharpe ratios on a 2.6-year sample carry about ±0.6 of error.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Strategy</th><th>Account</th><th class="n">CAGR</th><th class="n">Max DD</th><th class="n">IS Sharpe</th><th class="n">OOS Sharpe</th><th>Verdict</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Dip put spread · 9-name basket</td><td>$10k</td><td class="n">4.6%</td><td class="n neg">−6.0%</td><td class="n">0.85</td><td class="n">1.01</td><td><span class="pill go">FINALIST</span></td><td class="why">The signal beats the same spread entered unconditionally (+4.2% vs −1.5% per trade, p=0.001), beats random entry in 17 of 20 seeds OOS, and all 32 neighboring settings are positive OOS.</td></tr>
+    <tr><td>Dip put spread · SPY only</td><td>$10k</td><td class="n">10.9%</td><td class="n neg">−7.4%</td><td class="n">0.87</td><td class="n">1.60</td><td><span class="pill go">FINALIST</span></td><td class="why">20 trades and 20 wins. Entering one day late turns in-sample negative, so fill at the signal close.</td></tr>
+    <tr><td>Wheel QQQ · 0.15Δ calls, roll tested calls</td><td>$100k</td><td class="n">17.5%</td><td class="n neg">−19.8%</td><td class="n">0.93</td><td class="n">1.57</td><td><span class="pill go">FINALIST</span></td><td class="why">Its Sharpe lead over buy-and-hold grew OOS (+0.21 → +0.40). It beats buy-and-hold Sharpe on 8 of 9 names.</td></tr>
+    <tr><td>Covered call QQQ · 0.40Δ, hold to expiry</td><td>$100k</td><td class="n">18.6%</td><td class="n neg">−18.2%</td><td class="n">1.14</td><td class="n">1.39</td><td><span class="pill go">FINALIST</span></td><td class="why">The Sharpe lead held (+0.23 → +0.38). The old version lost money buying back in-the-money calls.</td></tr>
+    <tr><td>Collar SPY · long-dated put</td><td>$100k</td><td class="n">6.0%</td><td class="n neg">−2.4%</td><td class="n">1.71</td><td class="n">1.21</td><td><span class="pill watch">HEDGE ONLY</span></td><td class="why">It is the only structure that really hedged (−1.7% in April 2025), but it trailed buy-and-hold OOS.</td></tr>
+    <tr><td>Momentum top-2 → dip put spread</td><td>$10k</td><td class="n">9.1% OOS</td><td class="n neg">−4.6%</td><td class="n">2.48</td><td class="n">1.40</td><td><span class="pill watch">WATCHLIST</span></td><td class="why">Its neighboring settings collapse OOS, and 14 of its 24 trades are NVDA.</td></tr>
+    <tr><td>Iron condor SPY · 0.10Δ, 3% wings, 60 DTE, hold</td><td>$10k+</td><td class="n">9.8%</td><td class="n neg">−6.8%</td><td class="n">0.82</td><td class="n">1.46</td><td><span class="pill go">FINALIST</span></td><td class="why">The best plateau in 1,563 trials: every neighboring setting was positive, and it survives double slippage (Sharpe 0.93). All 15 trades won, so the max-loss tail is untested.</td></tr>
+    <tr><td>Iron condor SPY+QQQ+IWM</td><td>$100k</td><td class="n">8.2%</td><td class="n neg">−6.4%</td><td class="n">0.84</td><td class="n">1.02</td><td><span class="pill go">FINALIST</span></td><td class="why">Diversified version of the SPY condor. At $10k the sleeves are too small to trade.</td></tr>
+    <tr><td>Put spread + RSI2 call overlay</td><td>$100k</td><td class="n">9.7%</td><td class="n neg">−16.4%</td><td class="n">0.98</td><td class="n neg">0.54</td><td><span class="pill no">OVERFIT</span></td><td class="why">Best in-sample, then lost 12.7% of equity on one call spread in the 2026 rally.</td></tr>
+    <tr><td>8-name wheel portfolio</td><td>$100k</td><td class="n">20.0%</td><td class="n neg">−19.0%</td><td class="n">1.08</td><td class="n">0.95</td><td><span class="pill no">REJECTED</span></td><td class="why">It fell behind equal-weight buy-and-hold OOS (0.95 vs 1.36).</td></tr>
+    <tr><td>Earnings condor / fly / calendar</td><td>$100k</td><td class="n">—</td><td class="n">—</td><td class="n">+</td><td class="n neg">−</td><td><span class="pill no">REJECTED</span></td><td class="why">None was positive after costs. The "cheap-vol names" picked in-sample flipped negative OOS.</td></tr>
+    <tr><td>1DTE SPY/QQQ iron condor</td><td>$100k</td><td class="n neg">−61% total</td><td class="n neg">−63%</td><td class="n">—</td><td class="n">—</td><td><span class="pill no">REJECTED</span></td><td class="why">It lost −3.8% per trade over 1,377 trades (t −3.4), and still lost at zero slippage.</td></tr>
+    <tr><td>Buy-and-hold SPY (benchmark)</td><td>any</td><td class="n">17.9%</td><td class="n neg">−18.8%</td><td class="n" colspan="2">full Sharpe 1.14</td><td><span class="pill info">BENCHMARK</span></td><td class="why">The number to beat. QQQ returned 20.5% with a −22.8% max drawdown.</td></tr>
+  </tbody>
+  <caption>Full numbers are in the tuning folder REPORT.md, results.csv and finalists.json files, and in the dashboard's Options lab.</caption>
+</table></div>
+
+<div class="figs">
+  <figure>
+    <img src="{{IMG_DIP}}" alt="SPY price from 2024 to 2026 with dip put spread entries and exits, RSI(2) and IBS panels, and strategy equity against buy-and-hold.">
+    <figcaption>Dip put spread on SPY. Every trade was a winner, but the strategy sits in cash most of the time and grows more slowly than buy-and-hold.</figcaption>
+  </figure>
+  <figure>
+    <img src="{{IMG_WHEEL}}" alt="Tuned QQQ wheel equity against QQQ buy-and-hold at $100k, with drawdown panel and the August 2024 and April 2025 shocks shaded.">
+    <figcaption>Tuned QQQ wheel: $152,950 against $163,343 for buy-and-hold. It made a little less, with shallower drawdowns in both shocks.</figcaption>
+  </figure>
+</div>
+
+<section class="col">
+  <div class="eyebrow">Twenty years of evidence</div>
+  <h2>Filters don't time crashes. Emergency exits help a little.</h2>
+  <p>Alpaca's option history only starts in 2024 and contains no bear market. So the regime filters were also tested on Cboe's put-writing index from 2007 to 2026, which covers 2008, 2020 and 2022. Each filter could change exposure only at the monthly roll, with a switching cost.</p>
+  <ul>
+    <li><b>Entry gates did not help.</b> No family of monthly entry gates (VIX/VIX3M, 200-day, volatility premium, vol targeting) beat plain put-writing OOS. A gate cannot get out before a fast crash, and it then sits out the rebound.</li>
+    <li><b>Intramonth kill switches helped.</b> Exiting the day after VIX/VIX3M &gt; 1.2, VIX &gt; 40, or an 8% loss lifted OOS Sharpe from 0.50 to 0.64–0.79 and cut max drawdown from −29% to about −16%.</li>
+    <li><b>That benefit comes almost entirely from 2008 and 2020.</b> Without those two crashes it is noise, and no filter passed White's reality check (p = 0.36). On the 2024–26 Alpaca data the kill switch hurt, because it sold near the V-shaped lows.</li>
+  </ul>
+</section>
+<figure>
+  <img src="{{IMG_LONGHIST}}" alt="Log-scale equity of the Cboe PUT index baseline and filtered variants, 2007 to 2026.">
+  <figcaption>Cboe PUT index baseline against filtered variants, 2007–2026, with monthly-roll switching and costs applied.</figcaption>
+</figure>
+
+<section class="col" id="spreads">
+  <div class="eyebrow">Credit spreads and iron condors</div>
+  <h2>Hold far-out condors to expiry. Don't manage them.</h2>
+  <p>This search covered 1,563 variants of put spreads and iron condors. One pattern held up clearly. Fewer, longer, far out-of-the-money condors held to expiry beat actively managed spreads, after costs. The baseline put spread loses money mostly because of its stops: they are checked only at the close, so gaps carry the loss past the stop (2.56x the credit on a 2x rule), and they sell at the lows.</p>
+  <ul>
+    <li><b>F1, SPY iron condor:</b> 0.10Δ shorts, 3% wings, about 60 DTE, held to expiry, max loss 20% of equity. Out-of-sample Sharpe 1.46, full-period CAGR 9.8%, max drawdown −6.8%, beta about 0.3. It works at $10k as one contract. All 15 trades won, and it gained +1.4% through the April 2025 crash.</li>
+    <li><b>F2, the same condor on SPY, QQQ and IWM:</b> out-of-sample Sharpe 1.02. It works at $100k only.</li>
+    <li><b>Rejected:</b> the RSI2 call-spread overlay, stops, laddering, trend/VIX filters and the kill switch. The overlay looked best in-sample, then lost 12.7% of equity on one trade in the 2026 rally.</li>
+    <li><b>The tail is untested.</b> F1 never took a max loss in the sample. Its structural worst case is −20% of equity in one cycle, so size for that, not for the backtest drawdown. Its deflated Sharpe after 1,563 trials is about zero.</li>
+  </ul>
+</section>
+<figure>
+  <img src="{{IMG_SPREADS}}" alt="Spread finalists: equity curves and in-sample versus out-of-sample comparison.">
+  <figcaption>Spread finalists from the tuning run. Held-to-expiry condors had shallow drawdowns, and the RSI2 overlay (F3) degraded out of sample.</figcaption>
+</figure>
+
+<section class="col">
+  <div class="eyebrow">Can the backtester be trusted?</div>
+  <h2>Calibration and known limits</h2>
+  <p>The engine cloned three Cboe benchmarks on SPY options and compared calendar-year returns:</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Clone</th><th class="n">Cboe 2024</th><th class="n">Ours 2024</th><th class="n">Cboe 2025</th><th class="n">Ours 2025</th></tr></thead>
+  <tbody>
+    <tr><td>BXM · ATM buy-write</td><td class="n">20.1%</td><td class="n">17.1%</td><td class="n">8.9%</td><td class="n">12.2%</td></tr>
+    <tr><td>BXMD · 30Δ buy-write</td><td class="n">23.8%</td><td class="n">20.1%</td><td class="n">12.1%</td><td class="n">12.9%</td></tr>
+    <tr><td>PUT · ATM put-write (with T-bill interest)</td><td class="n">17.8%</td><td class="n">18.3%</td><td class="n">9.2%</td><td class="n">11.1%</td></tr>
+  </tbody>
+  <caption>All gaps are within ±3.6 points, which is expected because SPY options are not SPX options. No pricing bug is evident.</caption>
+</table></div>
+<section class="col">
+  <h3>Limits to keep in mind</h3>
+  <ul>
+    <li><b>Daily closes only.</b> Fills use the last trade, not quotes. Stops can gap far past their level, and greeks are inferred from prices.</li>
+    <li><b>Short sample.</b> It covers 2.6 years in one mostly bull regime, with 30–130 trades per strategy. The universe was chosen with hindsight.</li>
+    <li><b>Costs are uncertain.</b> The default model charges about 3x SPY's real bid-ask spread on narrow spreads. That's why plain put credit spreads looked like losers. With costs calibrated to real quote snapshots, the baseline SPY put spread goes from −2.8% to +2.8% a year. QQQ and IWM spreads really are wider, at 1.7–1.8x the default model.</li>
+    <li><b>Engine bugs found and worked around</b> (each documented in a <code>tuning/*/BUGS.md</code> file):
+      <ul>
+        <li>Spread sizing on mismatched prints created one fictitious +$20k trade.</li>
+        <li>The kill switch's loss trigger can never fire on spreads.</li>
+        <li>The wheel trade log ignores share P&amp;L.</li>
+        <li>The built-in covered call rolls in-the-money calls.</li>
+        <li>Signals fill on the same close that produced them; delay-by-one-day checks were run.</li>
+      </ul>
+      None of the core engine files were changed, so these need a deliberate fix.</li>
+    <li><b>Paper only.</b> Alpaca paper pays no interest on cash, which understates cash-secured strategies by about 2–5% a year.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Also built overnight</div>
+  <h2>The terminal and the bots</h2>
+  <ul>
+    <li><b>Dashboard rebuilt from three design reviews (visual, UX, charts):</b>
+      <ul>
+        <li>A "did today run / am I up" banner, and DRY RUN vs LIVE labels that can't be confused.</li>
+        <li>Run history and run detail pages, plus risk and performance panels.</li>
+        <li>Nine new charts.</li>
+        <li>A command bar with autocomplete and ticker lookup.</li>
+        <li>An Options lab that reads the real backtest results.</li>
+      </ul>
+      Preview it locally with <code>DEMO_MODE=1 npm run dev</code>.</li>
+    <li><b>Shorting bot: left exactly as committed for your review.</b> The hardening pass was stopped at your request and its partial edits were reverted. A list of bot-side changes the dashboard would benefit from is in <code>dashboard/docs/reviews/BOT_CHANGES_NEEDED.md</code>. The cron job is still live and placing paper trades at 15:55 ET.</li>
+    <li><b>Options bot:</b> the research, the backtester, the indicator library and the signal study are built. There is no live trading code yet. That is the next step once you pick a strategy.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Decisions for you</div>
+  <h2>Next steps</h2>
+  <ol class="steps">
+    <li>Review the shorting bot code and the dashboard on the branch, then merge or request changes.</li>
+    <li>Create the Supabase project and run both migrations so the dashboard can go live on Vercel.</li>
+    <li>Pick which options strategy to paper-trade first. The recommendation is the dip put spread on SPY, because it fits $10k and it is the simplest to automate.</li>
+    <li>Decide whether to fix the engine bugs before any further tuning.</li>
+  </ol>
+</section>
+
+</main>
+<footer>
+  <p>Sources: Alpaca historical option and stock bars (2024-01 → 2026-10), Cboe index and VIX histories (1990 → 2026), FRED, and SEC EDGAR 8-K filings. Research notes are in <code>Options Bot/research/</code>, tuning reports in <code>Options Bot/tuning/*/REPORT.md</code>, and charts in each <code>out/</code> folder. Academic citations were not resolved through LibKey this session because the connector needed a sign-in. Everything here is a hypothetical backtest, not live trading results.</p>
+</footer>

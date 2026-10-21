@@ -1,0 +1,40 @@
+[
+ {
+  "name": "IC_d10_w3_hold",
+  "params": {
+   "structure": "ic",
+   "put_delta": 0.1,
+   "call_delta": 0.1,
+   "wing": "pct",
+   "width_pct": 0.03,
+   "dte_min": 50,
+   "dte_max": 70,
+   "dte_target": 60,
+   "tp": null,
+   "sl_mult": null,
+   "breach": false,
+   "close_dte": null,
+   "risk_frac": 0.1,
+   "max_positions": 1
+  }
+ },
+ {
+  "name": "PCS_d20_w3_hold",
+  "params": {
+   "structure": "pcs",
+   "put_delta": 0.2,
+   "call_delta": 0.2,
+   "wing": "pct",
+   "width_pct": 0.03,
+   "dte_min": 50,
+   "dte_max": 70,
+   "dte_target": 60,
+   "tp": null,
+   "sl_mult": null,
+   "breach": false,
+   "close_dte": null,
+   "risk_frac": 0.1,
+   "max_positions": 1
+  }
+ }
+]

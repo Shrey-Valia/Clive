@@ -1,0 +1,38 @@
+
+### default costs, pcs: top 12 by IS plateau (mean IS Sharpe of cell + 1-step neighbours, SPY/QQQ avg)
+                 mg  delta     w  dte  is_sh  is_sh_min  plateau  plateau_min  is_cagr_SPY  is_cagr_QQQ  is_max_drawdown_SPY  is_trades_SPY
+     M3_hold_expiry   0.30 0.005   60  0.687      0.662    0.488        0.235        0.031       -0.236               -0.820            9.0
+M2_tp50_nostop_half   0.25 0.005   30  0.129     -0.262    0.470        0.129       -0.082        0.129               -0.245           60.0
+M2_tp50_nostop_half   0.20 0.005   45  0.109     -0.075    0.450        0.109       -0.037        0.047               -0.186           39.0
+     M3_hold_expiry   0.30 0.005   45  0.552      0.305    0.430        0.251       -0.057       -0.023               -0.854           11.0
+M2_tp50_nostop_half   0.30 0.005   45  0.438      0.009    0.379        0.134       -0.115        0.283               -0.376           46.0
+     M3_hold_expiry   0.25 0.005   60  0.476      0.419    0.371        0.130        0.014       -0.011               -0.701            9.0
+     M3_hold_expiry   0.30 0.005   30  0.251      0.210    0.368        0.251        0.025       -0.026               -0.278           17.0
+     M3_hold_expiry   0.30 0.010   60  0.235      0.234    0.337        0.130        0.010        0.027               -0.258            9.0
+     M3_hold_expiry   0.10 0.005   60  0.357      0.340    0.316        0.119        0.036       -0.005               -0.068            8.0
+     M3_hold_expiry   0.15 0.005   60  0.437      0.382    0.312        0.247        0.076       -0.086               -0.222            8.0
+M2_tp50_nostop_half   0.25 0.005   45  0.651      0.343    0.287        0.109       -0.065        0.270               -0.551           42.0
+     M3_hold_expiry   0.25 0.005   45  0.312      0.218    0.284       -0.050       -0.088        0.051               -0.449           11.0
+  marginal IS mg: M1_tp50_sl2_half: -0.68; M2_tp50_nostop_half: +0.00; M3_hold_expiry: +0.12; M4_tp50_breach_half: -0.35
+  marginal IS delta: 0.1: -0.27; 0.15: -0.23; 0.2: -0.19; 0.25: -0.16; 0.3: -0.30
+  marginal IS w: 0.005: -0.05; 0.01: -0.47; 0.02: -0.30; 0.03: -0.10
+  marginal IS dte: 30: -0.19; 45: -0.21; 60: -0.28
+
+### default costs, ic: top 12 by IS plateau (mean IS Sharpe of cell + 1-step neighbours, SPY/QQQ avg)
+                 mg  delta     w  dte  is_sh  is_sh_min  plateau  plateau_min  is_cagr_SPY  is_cagr_QQQ  is_max_drawdown_SPY  is_trades_SPY
+     M3_hold_expiry   0.10 0.030   60  0.729      0.655    0.407        0.246        0.040        0.041               -0.032            8.0
+     M3_hold_expiry   0.30 0.005   60  0.301      0.267    0.382        0.171       -0.292       -0.199               -0.511            8.0
+     M3_hold_expiry   0.10 0.020   45  0.009     -0.181    0.313        0.009       -0.023        0.016               -0.110           10.0
+     M3_hold_expiry   0.30 0.005   30  0.153      0.027    0.301        0.153       -0.158       -0.271               -0.348           16.0
+M2_tp50_nostop_half   0.10 0.030   60  0.277     -0.135    0.292        0.080       -0.010        0.033               -0.064           15.0
+     M3_hold_expiry   0.30 0.005   45  0.486      0.173    0.272        0.073       -0.465       -0.271               -1.122           11.0
+     M3_hold_expiry   0.10 0.010   60  0.198     -0.126    0.236        0.143       -0.029        0.047               -0.127            8.0
+     M3_hold_expiry   0.10 0.010   30  0.490      0.255    0.236       -0.470        0.095        0.028               -0.121           15.0
+     M3_hold_expiry   0.25 0.005   30  0.372      0.147    0.234        0.073       -0.049       -0.240               -0.386           17.0
+     M3_hold_expiry   0.10 0.020   60  0.259     -0.115    0.212       -0.136        0.040       -0.025               -0.046            8.0
+     M3_hold_expiry   0.25 0.005   60  0.569      0.394    0.210       -0.140       -0.177       -0.119               -0.883            8.0
+     M3_hold_expiry   0.30 0.010   60  0.171     -0.084    0.201       -0.062        0.072       -0.150               -0.327            8.0
+  marginal IS mg: M1_tp50_sl2_half: -0.88; M2_tp50_nostop_half: -0.51; M3_hold_expiry: -0.04; M4_tp50_breach_half: -1.06
+  marginal IS delta: 0.1: -0.32; 0.15: -0.47; 0.2: -0.61; 0.25: -0.81; 0.3: -0.91
+  marginal IS w: 0.005: -0.40; 0.01: -0.87; 0.02: -0.66; 0.03: -0.57
+  marginal IS dte: 30: -1.01; 45: -0.52; 60: -0.34
