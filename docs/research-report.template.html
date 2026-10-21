@@ -272,9 +272,9 @@ a { color: var(--amber); }
 <section class="col" id="o6">
   <div class="eyebrow">Live bot</div>
   <h2>Live options bot and code review</h2>
-  <p>The paper-trading bot for the dip put spread is built in <code>Options Bot/live/</code>. It trades SPY, QQQ and IWM and enters at about 15:50 with a multi-leg limit order at the mid, re-priced until a 15:58 cutoff. Exits are at 50% of credit, a close above the 5-day average, after 5 days, or 1 day before expiry. Max loss is capped at 25% per position and 50% total, with a VIX kill switch. It uses only a separate Alpaca paper account's keys, defaults to dry run, and has 42 tests.</p>
+  <p>The paper-trading bot for the dip put spread is built in <code>Options Bot/live/</code>. It trades SPY, QQQ and IWM. It decides at 15:55 ET (moved from 15:50 after the re-test below) and enters with a multi-leg limit order at the mid, re-priced every 30 seconds until a 15:58 cutoff. Exits are at 50% of credit, a close above the 5-day average, after 5 days, or 1 day before expiry. Max loss is capped at 25% per position and 50% total, with a VIX kill switch. It uses only a separate Alpaca paper account's keys and refuses to run if they match the shorting bot's account. It defaults to dry run, runs a mandatory 09:45 expiry-day sweep, and has 122 tests.</p>
   <p>Today's dry run found no signal: SPY, QQQ and IWM all closed strong. It would have sized one SPY 761/746 put spread at $1.66 credit, $1,334 max loss.</p>
-  <h3>Order-handling review: 16 findings to fix before going live</h3>
+  <h3>Two code reviews found 26 issues. All are now fixed and tested.</h3>
   <ul>
     <li><b>High:</b>
       <ul>
@@ -293,7 +293,7 @@ a { color: var(--amber); }
       </ul></li>
     <li><b>Verified correct:</b> leg construction, the credit/debit sign convention, cutoffs, the once-per-day guard and the paper-only refusals.</li>
   </ul>
-  <p><!--STRATEGY_REVIEW--> Full list: <code>Options Bot/live/REVIEW_orders.md</code>. A fix pass is queued after the strategy-fidelity review finishes.</p>
+  <p><!--STRATEGY_REVIEW--> Full list: <code>Options Bot/live/REVIEW_orders.md</code>. Each fix has a test that reproduces the original failure.</p>
 </section>
 
 <section class="col" id="o7">
