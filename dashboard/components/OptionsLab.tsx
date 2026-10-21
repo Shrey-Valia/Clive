@@ -41,19 +41,39 @@ export function OptionsLab({ lab }: { lab: BtLab }) {
     setSel(id);
     const u = new URL(window.location.href); u.searchParams.set("s", id); window.history.replaceState(null, "", u);
   };
-  const sorted = useMemo(() => [...lab.strategies].sort((a, b) => {
+  // 300+ series = strategy x ticker x capital; filter before showing anything.
+  const capitals = useMemo(() => [...new Set(lab.strategies.map((x) => x.capital).filter(Boolean))].sort((a, b) => Number(a) - Number(b)), [lab.strategies]);
+  const tickers = useMemo(() => [...new Set(lab.strategies.map((x) => x.underlying).filter(Boolean))].sort(), [lab.strategies]);
+  const [cap, setCap] = useState<number | null>(() => (capitals.includes(100000) ? 100000 : (capitals[capitals.length - 1] as number) ?? null));
+  const [tick, setTick] = useState<string>("ALL");
+  const [showAll, setShowAll] = useState(false);
+  const pool = useMemo(() => lab.strategies.filter((x) => (cap === null || x.capital === cap) && (tick === "ALL" || x.underlying === tick)), [lab.strategies, cap, tick]);
+  const sorted = useMemo(() => [...pool].sort((a, b) => {
     const x = val(a, sort.k), y = val(b, sort.k);
     if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1;
     return (typeof x === "string" ? x.localeCompare(String(y)) : x - Number(y)) * sort.dir;
-  }), [lab.strategies, sort]);
-  const best = (k: Key) => { const vs = lab.strategies.map((s) => val(s, k)).filter((v): v is number => typeof v === "number"); return vs.length ? Math.max(...vs) : null; };
+  }), [pool, sort]);
+  const shown = showAll ? sorted : sorted.slice(0, 25);
+  // Keep the detail panel on a run that is visible under the current filters.
+  useEffect(() => { if (sorted.length && !sorted.some((x) => x.id === sel)) setSel(sorted[0].id); }, [sorted, sel]);
+  const best = (k: Key) => { const vs = pool.map((s) => val(s, k)).filter((v): v is number => typeof v === "number"); return vs.length ? Math.max(...vs) : null; };
   const s = lab.strategies.find((x) => x.id === sel) ?? null;
 
   if (!lab.strategies.length) return <Panel n={1} title="Backtest lab" code="BT" bt><Empty text="NO STRATEGIES IN THE BACKTEST FILE YET" /></Panel>;
 
   return (
     <>
-      <Panel n={1} hot bt title="Strategy comparison" code="CMP" meta="CLICK A HEADER TO SORT · CLICK A ROW TO SELECT">
+      <Panel n={1} hot bt title="Strategy comparison" code="CMP" meta={`${pool.length} RUNS · CLICK A HEADER TO SORT · CLICK A ROW TO SELECT`}>
+        <div className="bt-filters" role="toolbar" aria-label="Filter backtests">
+          <span className="muted">CAPITAL</span>
+          {capitals.map((c) => (
+            <button key={String(c)} className={`chip${cap === c ? " on" : ""}`} aria-pressed={cap === c} onClick={() => setCap(c as number)}>${Number(c) / 1000}K</button>
+          ))}
+          <span className="muted">UNDERLYING</span>
+          {["ALL", ...tickers].map((t) => (
+            <button key={t} className={`chip${tick === t ? " on" : ""}`} aria-pressed={tick === t} onClick={() => setTick(t as string)}>{t}</button>
+          ))}
+        </div>
         <div className="scroll"><table className="dense fit bt-table">
           <thead><tr>
             {COLS.map((c) => (
@@ -65,7 +85,7 @@ export function OptionsLab({ lab }: { lab: BtLab }) {
             ))}
             <th>Underlying</th><th className="fill" />
           </tr></thead>
-          <tbody>{sorted.map((x) => (
+          <tbody>{shown.map((x) => (
             <tr key={x.id} className={x.id === sel ? "picked" : ""} onClick={() => choose(x.id)} tabIndex={0}
               onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(x.id); } }} aria-selected={x.id === sel}>
               {COLS.map((c) => {
@@ -84,19 +104,22 @@ export function OptionsLab({ lab }: { lab: BtLab }) {
             )}
           </tbody>
         </table></div>
+        {sorted.length > 25 && (
+          <button className="chip" onClick={() => setShowAll((v) => !v)}>{showAll ? "SHOW TOP 25" : `SHOW ALL ${sorted.length}`}</button>
+        )}
       </Panel>
 
       <div className="grid2">
         <Panel n={2} bt title="Risk vs return" code="RR" meta="X = |MAX DD| · Y = CAGR · SIZE = SHARPE">
-          <RiskReturnScatter strategies={lab.strategies} selected={sel} onSelect={choose} benchmark={lab.benchmark} />
+          <RiskReturnScatter strategies={pool} selected={sel} onSelect={choose} benchmark={lab.benchmark} />
         </Panel>
         <Panel n={3} bt title={s ? `Detail · ${s.name}` : "Detail"} code="DTL" meta={s ? `${s.underlying} · CAPITAL ${s.capital ? `$${s.capital.toLocaleString("en-US")}` : "—"}` : undefined}>
           {s ? <StrategyDetail s={s} bench={lab.benchmark?.equity ?? []} benchName={lab.benchmark?.name ?? "Benchmark"} /> : <Empty text="SELECT A STRATEGY" />}
         </Panel>
       </div>
 
-      <Panel n={4} bt title="Equity, indexed to 100" code="SM" meta="SHARED Y-SCALE · GRAY = BENCHMARK · DRAWDOWN STRIP BELOW EACH">
-        <StrategySmallMultiples strategies={sorted} benchmark={lab.benchmark?.equity ?? []} selected={sel} onSelect={choose} />
+      <Panel n={4} bt title="Equity, indexed to 100" code="SM" meta="TOP 12 BY CURRENT SORT · SHARED Y-SCALE · GRAY = BENCHMARK">
+        <StrategySmallMultiples strategies={sorted.slice(0, 12)} benchmark={lab.benchmark?.equity ?? []} selected={sel} onSelect={choose} />
       </Panel>
 
       {s && (
@@ -275,7 +298,7 @@ function MiniPanel({ s, pts, bench, t0, t1, yr, on, onSelect, hoverT, setHoverT 
   return (
     <div ref={ref} className={`mini${on ? " on" : ""}`}>
       <button className="mini-head" onClick={onSelect} aria-pressed={on}>
-        <b>{s.name}</b><span className={last.value >= 100 ? "pos" : "neg"}>{sPct(last.value - 100, 1)}</span>
+        <b>{s.name} · {s.underlying}</b><span className={last.value >= 100 ? "pos" : "neg"}>{sPct(last.value - 100, 1)}</span>
       </button>
       {w !== null && (
         <div className="chart">

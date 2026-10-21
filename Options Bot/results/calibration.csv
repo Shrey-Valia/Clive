@@ -1,0 +1,25 @@
+clone,cboe_index,cash_yield,year,clone_return,cboe_return,gap_pp,avg_net_delta,n_trades
+buy_hold,SPY total return,False,2024,0.2304,,,1.0,0
+buy_hold,SPY total return,False,2025,0.1771,,,1.0,0
+buy_hold,SPY total return,False,2026ytd,0.1338,,,1.0,0
+buy_hold,SPY total return,True,2024,0.2304,,,1.0,0
+buy_hold,SPY total return,True,2025,0.1771,,,1.0,0
+buy_hold,SPY total return,True,2026ytd,0.1338,,,1.0,0
+cal_bxm,BXM,False,2024,0.1708,0.201,-3.02,0.409,33
+cal_bxm,BXM,False,2025,0.1223,0.089,3.33,0.409,33
+cal_bxm,BXM,False,2026ytd,0.1141,,,0.409,33
+cal_bxm,BXM,True,2024,0.1726,0.201,-2.84,0.408,33
+cal_bxm,BXM,True,2025,0.1242,0.089,3.52,0.408,33
+cal_bxm,BXM,True,2026ytd,0.1152,,,0.408,33
+cal_bxmd,BXMD,False,2024,0.2005,0.238,-3.75,0.625,33
+cal_bxmd,BXMD,False,2025,0.1285,0.121,0.75,0.625,33
+cal_bxmd,BXMD,False,2026ytd,0.1101,,,0.625,33
+cal_bxmd,BXMD,True,2024,0.2025,0.238,-3.55,0.624,33
+cal_bxmd,BXMD,True,2025,0.13,0.121,0.9,0.624,33
+cal_bxmd,BXMD,True,2026ytd,0.1107,,,0.624,33
+cal_put,PUT,False,2024,0.1277,0.178,-5.03,0.391,33
+cal_put,PUT,False,2025,0.0633,0.092,-2.87,0.391,33
+cal_put,PUT,False,2026ytd,0.0805,,,0.391,33
+cal_put,PUT,True,2024,0.1825,0.178,0.45,0.389,33
+cal_put,PUT,True,2025,0.1106,0.092,1.86,0.389,33
+cal_put,PUT,True,2026ytd,0.1132,,,0.389,33

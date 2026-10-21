@@ -484,3 +484,10 @@ td.hm-empty { background: transparent !important; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.bt-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 11px; }
+.bt-filters .muted { margin-left: 6px; letter-spacing: 0.06em; }
+.bt-filters .muted:first-child { margin-left: 0; }
+.chip { background: none; border: 1px solid var(--rule); color: var(--text); padding: 2px 8px; font: 600 11px var(--f); letter-spacing: 0.04em; }
+.chip:hover { border-color: var(--amber-dim); color: var(--value); }
+.chip.on { border-color: var(--amber); color: #000; background: var(--amber); }
