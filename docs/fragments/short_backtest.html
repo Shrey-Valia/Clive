@@ -1,0 +1,78 @@
+<div class="callout red">
+  <h3>The live configuration loses money and can wipe out the account</h3>
+  <p>The current rules hold 5 shorts overnight at 19% → 15% of equity each, about 85% gross, with no stop. Backtested from 2016 to 2026, they lost money in 10 of 11 years and in both halves of the data. Two single-day squeezes would have nearly ended the account: <b>KOSS on 2021-01-26 (−98.7% of equity)</b> and <b>TOP on 2023-04-27 (−96.4%)</b>. The bot is running these rules on paper now. Nothing has been changed, pending your review.</p>
+</div>
+
+<section class="col">
+  <p>The backtest rebuilt the 15:45 "top gainers" scan for every trading day using Alpaca minute and daily bars across 6,612 stocks, including 939 that are no longer listed. The rebuilt top 20 overlaps the daily-close version by 89.8%. The bot's own scoring code ran on historical data: FINRA short interest with a publication lag, SEC FTDs, and historical Alpaca/Benzinga headlines put through the same catalyst classifier. Costs scale by price and liquidity. Borrow is charged at 15% a year, or 50% for cheap or crowded names. Rules were chosen on 2016–2021 and tested on 2022–2026, with 1,037 trials counted.</p>
+</section>
+
+<div class="scroll"><table>
+  <thead><tr><th>Current rules</th><th class="n">IS 2016–21</th><th class="n">OOS 2022–26</th></tr></thead>
+  <tbody>
+    <tr><td>Sharpe / CAGR</td><td class="n neg">−1.58 / −89%</td><td class="n neg">−0.42 / −75%</td></tr>
+    <tr><td>Max drawdown</td><td class="n neg">−100% (ruin by Apr 2020)</td><td class="n neg">−99.9%</td></tr>
+    <tr><td>Trades / win rate</td><td class="n">7,414 / 48%</td><td class="n">5,950 / 52%</td></tr>
+    <tr><td>Mean trade, gross → net</td><td class="n">−0.15% → −0.63%</td><td class="n">+0.28% → −0.21%</td></tr>
+    <tr><td>Trades worse than −10%</td><td class="n">7.2%</td><td class="n">10.6%</td></tr>
+    <tr><td>Worst day for the account</td><td class="n neg">−98.7%</td><td class="n neg">−96.4%</td></tr>
+  </tbody>
+  <caption>Even at zero cost, Sharpe is −0.50 IS and +0.52 OOS. Daily-bar stops (10–40%) made it worse, and an IWM hedge did nothing. The tails match the first bot's backtest almost exactly.</caption>
+</table></div>
+
+<section class="col">
+  <h3>The edge is real but sits in the wrong part of the hold</h3>
+  <p>Stocks that spike into the close keep rising overnight, then fade during the next session. Holding from 15:55 to 15:55 collects both legs, so they cancel, and costs turn the result negative.</p>
+</section>
+<figure>
+  <img src="{{SIMG_LEGS}}" alt="Mean gross short return by leg: overnight negative, next day positive, the bot's full hold near zero.">
+  <figcaption>Average short return across all eligible top-20 names. Overnight: −0.49% IS, −0.14% OOS. Next day, open to 15:55: +0.40% IS, +0.29% OOS.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>What the checklist actually predicts</h3>
+  <p>Rank correlation of each feature with the next day's short return, among each day's eligible names:</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Feature</th><th class="n">IS IC (t)</th><th class="n">OOS IC (t)</th><th>Reading</th></tr></thead>
+  <tbody>
+    <tr><td>Total short score</td><td class="n">+0.014 (1.5)</td><td class="n">+0.045 (4.4)</td><td class="why">Weak IS, better OOS. Useful only at the top: requiring a score of 70+ flips OOS positive.</td></tr>
+    <tr><td>% change at 15:45</td><td class="n">+0.038 (4.2)</td><td class="n">+0.033 (3.2)</td><td class="why">Consistent. Bigger spikes fade more.</td></tr>
+    <tr><td>ATR (volatility)</td><td class="n">+0.058 (6.2)</td><td class="n">+0.081 (7.4)</td><td class="why">Strongest signal before costs.</td></tr>
+    <tr><td>Crowding (SI/DTC block)</td><td class="n">+0.031 (2.7)</td><td class="n">0.000 (0.0)</td><td class="why">Didn't hold OOS.</td></tr>
+    <tr><td>Raw days-to-cover</td><td class="n">−0.069 (−5.8)</td><td class="n">−0.042 (−3.8)</td><td class="why">High DTC is a worse short. Supports the squeeze-trap idea.</td></tr>
+    <tr><td>Relative volume</td><td class="n">−0.025 (−2.8)</td><td class="n">−0.018 (−1.6)</td><td class="why">Opposite of the checklist. Higher rvol is a worse short.</td></tr>
+    <tr><td>Catalyst</td><td class="n">+0.013 (1.5)</td><td class="n">+0.030 (2.9)</td><td class="why">Weak but positive. Keep the real-catalyst exclusion as insurance.</td></tr>
+    <tr><td>FTD</td><td class="n">+0.004 (0.4)</td><td class="n">−0.008 (−0.7)</td><td class="why">No signal. Drop it.</td></tr>
+  </tbody>
+</table></div>
+
+<section class="col">
+  <h3>The proposed fix: short the next day intraday, smaller and pickier</h3>
+  <p>Scan at 15:45 as today, but short the picks at the next day's open and cover at 15:55 that day. Hold up to 5 names at 10% each, 50% gross at most. Only names scoring 70+, priced at least $10, with at least $10M average daily volume.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th></th><th class="n">Current IS</th><th class="n">Current OOS</th><th class="n">Proposed IS</th><th class="n">Proposed OOS</th></tr></thead>
+  <tbody>
+    <tr><td>Sharpe</td><td class="n neg">−1.58</td><td class="n neg">−0.42</td><td class="n pos">1.33</td><td class="n pos">1.21</td></tr>
+    <tr><td>CAGR</td><td class="n neg">−89%</td><td class="n neg">−75%</td><td class="n pos">11.0%</td><td class="n pos">10.7%</td></tr>
+    <tr><td>Max drawdown</td><td class="n neg">−100%</td><td class="n neg">−99.9%</td><td class="n neg">−9.5%</td><td class="n neg">−8.3%</td></tr>
+    <tr><td>Trades</td><td class="n">7,414</td><td class="n">5,950</td><td class="n">162</td><td class="n">174</td></tr>
+  </tbody>
+  <caption>Per trade: mean +3.4% net, median +1.6%. Worst trade −74%, which is −7.4% of equity at 10% weight. OOS CAGR with costs doubled: 9.7%. This configuration was assembled after seeing the grid, and its deflated Sharpe at 1,037 trials is only 0.49. It makes about 30 trades a year, mostly since 2020. Paper-trade it before trusting it.</caption>
+</table></div>
+<figure>
+  <img src="{{SIMG_EQUITY}}" alt="Log-scale equity of the current rules (going to zero by 2020) against intraday proposal variants rising steadily from 2016 to 2026.">
+  <figcaption>Current rules in red go to ruin by 2020. The proposed version, P7 in bold yellow, stays positive through both periods. The full proposal is in <code>Stock Shorting Bot/research/PROPOSAL.md</code>.</figcaption>
+</figure>
+<section class="col">
+  <h3>Proposed changes, none applied yet</h3>
+  <ol class="steps">
+    <li><b>Stop holding overnight.</b> Short at the next open (09:31 cron) and cover at 15:55.</li>
+    <li><b>Cut size to 10% per name</b>, 50% gross at most.</li>
+    <li><b>Add a minimum score of 70.</b> Allow fewer than 5 names, or none.</li>
+    <li><b>Add a minimum price of $10 and minimum average daily volume of $10M</b>, on top of Alpaca's borrow check.</li>
+    <li><b>Set the FTD weight to 0.</b> Keep the catalyst and squeeze exclusions.</li>
+  </ol>
+  <p class="dim">Caveats: there is no historical borrow data, so a price and volume gate stands in for it. Squeeze names were likely hard to borrow then, but don't rely on that. Borrow fees are assumed, and real fees on spiking names run 50–300% a year. Some delisted names are still missing. Small-cap fills at the open will be worse than modeled.</p>
+</section>

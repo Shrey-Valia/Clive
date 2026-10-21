@@ -42,6 +42,7 @@ a { color: var(--amber); }
   <a href="#o5"><span>PART 2 · OPTIONS</span><b>Portfolios for $10k and $100k</b></a>
   <a href="#o6"><span>PART 2 · OPTIONS</span><b>Live options bot and code review</b></a>
   <a href="#o7"><span>PART 2 · OPTIONS</span><b>What the papers say</b></a>
+  <a href="#p1"><span>PART 3 · PAIRS</span><b>Pairs trading: papers and backtest</b></a>
   <a href="#x1"><span>BOTH</span><b>Caveats, bugs and next steps</b></a>
   <a href="https://claude.ai/artifact/RQB5uUCcwzGG4cho1muPLr"><span>COMPANION</span><b>Overnight brief (short version)</b></a>
 </nav>
@@ -302,6 +303,13 @@ a { color: var(--amber); }
 </section>
 <!--PAPERS-->
 
+<!-- ============================ PART 3 ============================ -->
+<div class="part" id="p1"><div class="eyebrow">Part 3</div><h2>Pairs Trading</h2></div>
+<section class="col">
+  <p>Pairs trading buys one stock and shorts a similar one when their prices drift apart, betting that the gap closes. This part covers the academic literature and a 2016–2026 backtest on Alpaca data.</p>
+</section>
+<!--PAIRS-->
+
 <!-- ============================ BOTH ============================ -->
 <section class="col" id="x1">
   <div class="eyebrow">Read before acting</div>
@@ -327,7 +335,7 @@ a { color: var(--amber); }
   <h3>Next steps</h3>
   <ol class="steps">
     <li>Review the shorting bot and the branch, then merge or request changes. The shorting bot is running on paper now.</li>
-    <li>Read the shorting backtest verdict in section 4 when it lands. If the strategy has no edge after costs, change the rules or the sizing before trusting the paper results.</li>
+    <li><b>Decide on the shorting bot.</b> The backtest says the current rules lose money and carry ruin risk. You can pause the 15:40 cron, switch it to dry-run, or apply the intraday proposal in section 4 after review.</li>
     <li>Create the second Alpaca paper account and add its keys to <code>Options Bot/.env</code>. Then I fix the review findings, and the dip put spread runs dry for a few days before <code>--execute</code>.</li>
     <li>Add the SPY iron condor as the second options sleeve once the first one has run cleanly.</li>
     <li>Set up Supabase and Vercel so the dashboard goes live.</li>

@@ -1,0 +1,40 @@
+{
+  "n_trials": 1033,
+  "var_sr_daily": 0.004268537306981135,
+  "dsr": {
+    "baseline": {
+      "dsr": 6.800372638928872e-52,
+      "sr0_daily": 0.2132727350997447
+    },
+    "best_is": {
+      "dsr": 1.865863490325499e-06,
+      "sr0_daily": 0.2132727350997447
+    },
+    "robust_is": {
+      "dsr": 1.865863490325499e-06,
+      "sr0_daily": 0.2132727350997447
+    }
+  },
+  "best_is": "score_chg|n10|atr50|stopNone|minchg0.2|wkTrue|entry_open1_exit_close1",
+  "robust_is": "score_chg|n10|atr50|stopNone|minchg0.2|wkTrue|entry_open1_exit_close1",
+  "psr_oos": {
+    "baseline": 0.17073346808442252,
+    "best_is": 0.597084358068833,
+    "robust_is": 0.597084358068833
+  },
+  "wf_rolling": {
+    "days": 1960,
+    "active_days": 1960,
+    "cagr": 0.023194676122619606,
+    "total": 0.19523478730437516,
+    "vol": 0.374431449398324,
+    "sharpe": 0.2606991248018662,
+    "maxdd": -0.6531999733086339,
+    "worst_day": -0.40480374520533524,
+    "best_day": 0.16254013536103568,
+    "skew": -2.818249190181132,
+    "kurt": 54.67687312443575,
+    "ruined": false,
+    "ann_mean": 0.0976139511564373
+  }
+}
