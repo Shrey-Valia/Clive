@@ -1,26 +1,33 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { IBM_Plex_Mono } from "next/font/google";
 import { Tape } from "@/components/Tape";
 import { TopBar } from "@/components/Terminal";
-import { getTape, isDemo } from "@/lib/data";
+import { AlertBanner } from "@/components/Bits";
+import { AutoRefresh, ChromeGate, StatusBar } from "@/components/Live";
+import { getChrome, getTape, isDemo } from "@/lib/data";
 import "./globals.css";
 
 const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--f-mono" });
 
-export const metadata: Metadata = { title: "Clive Terminal", description: "Every bot, its positions and its performance." };
+export const metadata: Metadata = { title: "Clive Terminal", description: "Every bot, its positions and its performance.", manifest: "/manifest.webmanifest" };
+export const viewport: Viewport = { themeColor: "#000000", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const tape = await getTape().catch(() => []);
+  const [tape, chrome] = await Promise.all([
+    getTape().catch(() => ({ date: null, live: false, items: [] })),
+    getChrome().catch(() => ({ alerts: [], email: null, positions: null, gross: null, equity: null, lastSync: null, tickers: [] as string[] })),
+  ]);
   return (
     <html lang="en" className={mono.variable}>
       <body>
-        <TopBar demo={isDemo} />
-        <Tape items={tape} />
+        <ChromeGate>
+          <TopBar demo={isDemo} tickers={chrome.tickers} />
+          <Tape {...tape} />
+          <AlertBanner alerts={chrome.alerts} />
+          <AutoRefresh />
+        </ChromeGate>
         <main className="wrap">{children}</main>
-        <footer className="statusbar">
-          <span>CLIVE TERMINAL</span><span>ALPACA PAPER</span><span>SUPABASE {isDemo ? "OFFLINE · DEMO" : "LINKED"}</span>
-          <span className="hint">PRESS / FOR COMMAND · F1–F4 TO SWITCH</span>
-        </footer>
+        <StatusBar demo={isDemo} email={chrome.email} positions={chrome.positions} gross={chrome.gross} lastSync={chrome.lastSync} />
       </body>
     </html>
   );
