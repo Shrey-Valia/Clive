@@ -1,0 +1,90 @@
+<section class="col">
+  <p>Three agents read about 120 papers: academic journals, SSRN and NBER working papers, Fed, BIS and SEC notes, and Cboe research. Each topic was checked against our own backtest results. The full reviews, with per-paper notes and reference lists, are in <code>Options Bot/research/</code>: <code>papers_0dte.md</code>, <code>papers_technical_longdated.md</code> and <code>papers_news.md</code>. Citations were found via web search and have <b>not been resolved through LibKey</b>, because the connector needs your sign-in. Figures taken from abstracts or secondary summaries are tagged [verify] in those files.</p>
+</section>
+
+<div class="verdicts">
+  <div><span class="pill no">DON'T BUILD</span><b>0DTE / 1DTE bot</b><p>No paper shows an after-cost edge for a systematic same-day seller or buyer in any structure. The daily premium is about 0.01% of the index, smaller than one SPY bid-ask spread.</p></div>
+  <div><span class="pill go">SUPPORTED</span><b>Dip-timed put spreads, 7–60 DTE</b><p>Index returns have reverted day to day since about 2000, and short-dated put premiums rise after drops. This is the best-documented timing edge, and it backs our finalist.</p></div>
+  <div><span class="pill no">FILTER ONLY</span><b>News-triggered option entries</b><p>The news drift is real but short and small-cap. LLM headline signals stop paying at about 20 bp of costs and decayed fast. Headlines are best used to avoid trades.</p></div>
+</div>
+
+<section class="col">
+  <h3>0DTE and ultra-short options</h3>
+  <ul>
+    <li><b>The premium is tiny per day.</b> Annualized, the 0DTE variance premium is about 5x the 1-month one, but per day it is about 0.01% of the index (Dim, Eraker &amp; Vilkov). The median 10:00-to-close premium is about 0.0011% of spot (Vilkov).</li>
+    <li><b>Short volatility loses after costs at every entry time.</b> Almeida, Freire &amp; Hizmeri use SPX 1-minute bid/ask data from 2012–2025. Delta-hedged ATM writing has a per-trade Sharpe of −0.010 to −0.042 after costs for entries from 10:00 to 14:00. Their one profitable filter stalled once daily expiries arrived in 2022.</li>
+    <li><b>A widely cited "winners" study was corrected.</b> Vilkov's 0DTE trading-rules study had under-charged bid-ask costs by 100x. After the August 2026 correction, every strategy is negative net of costs. Iron condors and flies are the worst structure: Sharpe −0.56 at the mid and −2.67 net, annualized.</li>
+    <li><b>Retail 0DTE condors usually win but lose on average.</b> Beckmeyer, Branger &amp; Gayda: retail 0DTE traders lost about $241k a day from 2021–2023, and about 60% of that was costs. Retail condors had a median of +5.5% of margin but a mean of −1.1%, and the worst 5% lost the full margin.</li>
+    <li><b>Where the premium does sit:</b>
+      <ul>
+        <li>At-the-money strikes. About 80% of ATM 0DTE prices exceed a risk-averse upper bound, while OTM options are often cheap.</li>
+        <li>Later in the day. The annualized premium rises from 1.8 at 10:00 to 3.0 at 14:00.</li>
+        <li>Expiries spanning CPI, FOMC or jobs reports. These are up to 7.5% dearer, and the FOMC premium is 44% larger.</li>
+        <li>Not 1DTE on ordinary days, which is roughly zero and negative since 2022.</li>
+      </ul></li>
+  </ul>
+  <h3>Why our 1-day SPY/QQQ condor lost money (−3.8% per trade, t −3.4)</h3>
+  <ul>
+    <li><b>Wrong strikes.</b> It sold OTM strikes, where same-day options aren't overpriced. That is why it lost even at zero slippage.</li>
+    <li><b>Wrong days.</b> It traded every day, when the premium exists mainly on event days.</li>
+    <li><b>Wrong shape.</b> Symmetric strikes ignore skew and upward drift, so the call side got breached in the rally, especially on QQQ.</li>
+    <li><b>Overnight risk.</b> It was held overnight unhedged, so gaps and after-hours earnings created the max-loss days.</li>
+    <li><b>Overstated significance.</b> SPY and QQQ trades on the same day are correlated, so the true t-stat is closer to −2.4 to −3.</li>
+  </ul>
+  <h3>Alpaca and SPY constraints</h3>
+  <ul>
+    <li>Alpaca rejects orders on expiring SPY/QQQ contracts after 15:30 ET, so "settle at the next close" can't be implemented as tested.</li>
+    <li>SPY options are American and physically settled. A short strike near the close can be assigned after hours, leaving about $55–60k of shares per contract against a $500 max-risk spread. Flatten anything near the money by 15:25.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h3>Longer holds and technical entry signals</h3>
+  <ul>
+    <li><b>The volatility premium is a short-maturity effect.</b> ATM straddles lose about 3% a week (Coval &amp; Shumway). Hedging variance news from one quarter out to 14 years cost nothing on average, so shorting LEAPS earns almost no premium (Dew-Becker et al.). Front-month, near-the-money puts are the best to sell per unit of stress loss (Israelov &amp; Tummala).</li>
+    <li><b>Weekly selling isn't better than monthly.</b> Cboe's weekly put-write collected 39.3% gross premium a year versus 24.1% for the monthly, but it compounded lower: 5.6% vs 6.6% from 2006–2015. That matches our own 2007–2026 WPUT result.</li>
+    <li><b>Short-term mean reversion is the best-documented index signal.</b> Daily index autocorrelation flipped from about +0.04 to about −0.04 across 20 indexes as ETFs grew (Baltussen, van Bekkum &amp; Da).</li>
+    <li><b>Moving-average and trend rules mostly don't survive.</b> The best Brock–Lakonishok–LeBaron rule was not significant after data-snooping correction (Sullivan, Timmermann &amp; White). There is no significant moving-average outperformance in long samples (Zakamulin). That is consistent with our finding that the 200-day and VIX entry gates don't help.</li>
+    <li><b>Volatility-state timing has better evidence than price-trend timing.</b> The VIX term-structure slope predicts straddle returns (Johnson 2017). The implied-minus-realized volatility spread predicts option returns (Goyal &amp; Saretto). The premium is not reliably higher when risk rises (Cheng 2019).</li>
+    <li><b>Timing within the day and week matters.</b> Delta-hedged index options lose about −1.0% close-to-open and gain +0.3% open-to-close (Muravyev &amp; Ni). Option returns are much lower over weekends (Jones &amp; Shemesh). Sellers earn overnight and over weekends.</li>
+    <li><b>Expect decay and demand a high bar.</b> Anomaly returns fall about 58% after publication (McLean &amp; Pontiff). New findings should clear t &gt; 3 (Harvey, Liu &amp; Zhu). Our 2.6-year windows give a Sharpe standard error of about 0.6, so a Sharpe of 1.0–1.5 does not clear that bar.</li>
+  </ul>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Our finalist</th><th>What the literature says</th><th>Verdict</th></tr></thead>
+  <tbody>
+    <tr><td>RSI(2)/IBS dip put spread, 7–14 DTE</td><td class="why">Two documented mechanisms back it: index reversal since 2000, and put premia rising after drops (Aït-Sahalia, Karaman &amp; Mancini). The 200-day clause has the least support, so test the rule without it.</td><td><span class="pill go">SUPPORTED</span></td></tr>
+    <tr><td>SPY iron condor, 0.10Δ, 60 DTE, held to expiry</td><td class="why">60 DTE is in the well-documented harvesting band. But 0.10Δ is deep OTM, which is rated worse per unit of risk. Its 1.46 Sharpe on about 15 cycles can't be told apart from the indexes' long-run 0.5–0.7.</td><td><span class="pill watch">PARTLY</span></td></tr>
+    <tr><td>QQQ wheel with 0.15Δ calls</td><td class="why">Selling OTM calls is the right direction: covered calls carry an unpaid reversal bet (Israelov &amp; Nielsen; Bali &amp; Murray). But most of the return is QQQ exposure, so judge it against beta-adjusted buy-and-hold.</td><td><span class="pill watch">MIXED</span></td></tr>
+    <tr><td>No regime entry gates</td><td class="why">Trend filters have weak evidence after 1990. The big short-volatility losses began from calm term structure, so gates fire after the damage. The literature prefers vol-scaled sizing over on/off gates.</td><td><span class="pill go">CONSISTENT</span></td></tr>
+  </tbody>
+</table></div>
+
+<section class="col">
+  <h3>News- and sentiment-driven entries</h3>
+  <ul>
+    <li><b>The news drift is real but short and small-cap.</b> Ke, Kelly &amp; Xiu, on Dow Jones news from 1989–2020: the equal-weight long-short Sharpe is 4.21, but value-weighted it is 1.24. Large caps finish reacting in 1 day (11 bp) versus about 3 days for small caps (46 bp). The net-of-cost Sharpe peaks around 2.3.</li>
+    <li><b>The LLM headline edge dies at modest costs and decays fast.</b> Lopez-Lira &amp; Tang (GPT-4, 2021–2024): about 0.34% a day before costs, unprofitable at 20 bp per round trip. The Sharpe fell from 6.54 in late 2021 to 1.22 in early 2024. Most of the edge was on the short side.</li>
+    <li><b>The predicted option edge is far smaller than option spreads.</b> The one text-to-option-return paper finds 0.33–0.49% a month (Cao et al. 2024), against a 12.6% average retail option bid-ask spread (Bryzgalova, Pavlova &amp; Sikorskaya).</li>
+    <li><b>Scheduled and unscheduled news behave differently.</b> Buying options pays on unscheduled news, and selling only before scheduled events (Fodor, Muravyev, Cremers &amp; Weinbaum). Scheduled risk is priced into implied volatility in advance (Dubinsky et al.). Post-earnings drift has been nonexistent in large caps since about 2006 (Martineau). That matches our earnings tests finding no edge.</li>
+    <li><b>Retail is usually the losing side, and the speed edge is gone.</b> Retail option buyers lose about 5–9% around earnings. Robinhood herding is followed by −3% to −4.7% returns. Macro news is priced within about 5 ms (Chordia, Green &amp; Kottimukkalur).</li>
+    <li><b>The best use of news is as a filter.</b> Identified news explains about half of overnight idiosyncratic volatility (Boudoukh et al.). That supports the shorting bot's catalyst check and suggests the same kind of guard on options entries.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h3>New rules worth testing</h3>
+  <p>These came from the papers. None has been backtested yet, and each would be judged on data it never saw, like everything else in this report.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Rule</th><th>Source</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Dip put spread with a volatility-premium filter. Enter only if VIX minus 10-day SPY realized vol &gt; k (k = 0, 2, 4), or scale size by that spread.</td><td>Goyal–Saretto; Bollerslev–Tauchen–Zhou</td><td class="why">Volatility-state timing has the best evidence. Cheap to test on our finalist.</td></tr>
+    <tr><td>Choose expiry by term structure. On a dip, sell 7–14 DTE when VIX9D/VIX &lt; 1, and 30–45 DTE when it's above 1.</td><td>Johnson 2017; Aït-Sahalia et al.</td><td class="why">The term-structure slope predicts which maturities are overpriced.</td></tr>
+    <tr><td>Enter at the close and exit at the open, comparing immediate entry with a Thursday/Friday close.</td><td>Muravyev–Ni; Jones–Shemesh</td><td class="why">Sellers earn overnight and over weekends. Few parameters, so little room for overfitting.</td></tr>
+    <tr><td>News filter on premium selling. Skip or close on fresh negative unscheduled headlines, real-catalyst or dilution news, or abnormal OTM option volume.</td><td>Fodor et al.; Boudoukh et al.; Augustin et al.</td><td class="why">Uses news where it has proven value: avoiding jumps. It must improve drawdown, not just win rate.</td></tr>
+    <tr><td>Hype fade. A bear call spread 14–30 DTE after a hype-labelled or stale-news spike of +5% or more.</td><td>Tetlock 2011; Barber et al.</td><td class="why">Stale news and retail herding reverse. Pairs naturally with the shorting bot's classifier.</td></tr>
+    <tr><td>0DTE test only, not a bot. Sell an SPY ATM iron fly at 10:00, 12:00 or 14:00, exit by 15:25, and include an FOMC/CPI event-day variant.</td><td>Bandi–Fusari–Renò; Dim–Eraker–Vilkov</td><td class="why">The only place 0DTE premium is documented. It needs 1-minute bars, real per-leg costs and date-clustered statistics.</td></tr>
+  </tbody>
+  <caption>Stop applies to every rule: when the literature finds no after-cost edge, our backtests did too (0DTE, earnings, news). Treat a new rule as unproven until it clears our walk-forward and a deflated Sharpe.</caption>
+</table></div>

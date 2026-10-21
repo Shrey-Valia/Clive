@@ -21,6 +21,7 @@ IMAGES = {
 FRAGMENTS = {
     "SHORT_BACKTEST": os.path.join(HERE, "fragments", "short_backtest.html"),
     "STRATEGY_REVIEW": os.path.join(HERE, "fragments", "strategy_review.html"),
+    "PAPERS": os.path.join(HERE, "fragments", "papers.html"),
 }
 PENDING = {
     "SHORT_BACKTEST": '<div class="pending"><b>STILL RUNNING</b><p>A research agent is rebuilding 2016–2026 "top gainers at 15:45" from Alpaca minute and daily bars, and backtesting the checklist with realistic costs, borrow and stops. It will judge on 2022–2026 after choosing on 2016–2021. This section will update in place with the verdict.</p></div>',
