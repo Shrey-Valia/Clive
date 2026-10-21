@@ -21,6 +21,8 @@ IMAGES = {
 ROOT_IMAGES = {
     "SIMG_LEGS": "Stock Shorting Bot/research/out/leg_decomposition.png",
     "SIMG_EQUITY": "Stock Shorting Bot/research/out/proposal_equity.png",
+    "PIMG_EQUITY": "Pairs Research/out/equity_by_method.png",
+    "PIMG_SPREADS": "Pairs Research/out/spread_examples.png",
 }
 # Optional HTML fragments dropped into <!--NAME--> markers when the file exists.
 FRAGMENTS = {

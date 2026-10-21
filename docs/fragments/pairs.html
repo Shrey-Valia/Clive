@@ -1,0 +1,54 @@
+<div class="verdicts">
+  <div><span class="pill no">DON'T DEPLOY</span><b>Classic pairs trading on US large caps</b><p>The papers find roughly zero after costs since about 2010. Our 2017–2026 backtest confirms it: every method was flat to slightly negative out of sample. It acts as a mild crash hedge and earns nothing the rest of the time.</p></div>
+  <div><span class="pill watch">CONTEXT</span><b>Where it used to work</b><p>Gatev, Goetzmann &amp; Rouwenhorst found about 1.44% a month from 1962 to 2002. Excess returns fell from 118 bp a month before 1989 to 38 bp after, and to about zero after 2010 as quant funds crowded in.</p></div>
+</div>
+
+<section class="col">
+  <h3>What the papers say</h3>
+  <p>The reviewer read nine papers in full and summarized about 15 more. Notes are in <code>Pairs Research/papers_pairs.md</code>. Citations were found via web search and are not LibKey-resolved, and figures taken from abstracts are tagged [verify].</p>
+  <ul>
+    <li><b>The classic method (Gatev, Goetzmann &amp; Rouwenhorst 2006).</b> Form pairs over 12 months, trade them for the next 6, open at a 2σ gap and close when prices cross. Top-20 pairs earned 1.44% a month, or 0.90% when trading a day after the signal. Pairs stayed open about 3.75 months.</li>
+    <li><b>The edge decayed.</b> After costs, 29 variants averaged +0.12% a month and were "largely unprofitable post 2002" (Do &amp; Faff 2012). About 32% of pairs never converge.</li>
+    <li><b>Method comparison, 1962–2014, after costs</b> (Rad, Low &amp; Faff 2016). Distance earned 38 bp a month, cointegration 33 bp and copula 5 bp. Trading opportunities fell sharply after 2009.</li>
+    <li><b>Everything lost money in 2010–2015</b> (Clegg &amp; Krauss 2018, S&amp;P 500, 5 bp a side). Every method returned −0.2% to −2.8% a year after costs while the S&amp;P made +13% a year. Machine-learning stat-arb lost 14–25% a year over the same span (Krauss, Do &amp; Huck).</li>
+    <li><b>The strongest framework, ETF residuals</b> (Avellaneda &amp; Lee 2010). This trades each stock against its sector ETF. Sharpe was 1.1–1.44 over 1997–2007, falling to about 0.6–0.9 over 2003–07.</li>
+    <li><b>Crowding risk</b> (Khandani &amp; Lo). Generic stat-arb lost about 1–3% a day on Aug 7–9, 2007 as funds unwound together. It then rebounded +5.9% on Aug 10.</li>
+    <li><b>How pairs break.</b> Pairs diverge for good, earnings or M&amp;A news drives the gap, crowded unwinds trigger stops just before the snap-back, the short leg gets recalled or squeezed, and backtests suffer look-ahead and survivorship bias from today's index list.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h3>Our backtest: 2017–2026 on Alpaca data</h3>
+  <p>The universe was today's S&amp;P 500, rebuilt point-in-time from yearly index snapshots to measure survivorship: 736 symbols, delisted names included. There were also 44 ETF pairs and 15 classic pairs such as KO/PEP, V/MA and XOM/CVX. Signals at the close traded at the next open. Costs ran 2–5 bp a side, and borrow was charged at 0.5% a year. Parameters were chosen on 2017–2021 and tested on 2022–2026. 61 runs were counted.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Method</th><th class="n">IS Sharpe / CAGR</th><th class="n">OOS Sharpe / CAGR</th><th class="n">OOS max DD</th><th class="n">% converged</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr><td>Distance (GGR): 2σ, 20 pairs, same sector</td><td class="n">−0.23 / −0.8%</td><td class="n">−0.03 / −0.1%</td><td class="n neg">−8.3%</td><td class="n">42%</td><td class="why">The honest baseline. About zero before costs, slightly negative after.</td></tr>
+    <tr><td>Cointegration, literature spec (p&lt;0.01, half-life 5–30 days, stop 3.5σ)</td><td class="n">0.00 / 0.0%</td><td class="n neg">−0.77 / −1.2%</td><td class="n neg">−6.4%</td><td class="n">13%</td><td class="why">Significantly negative OOS. Bootstrap CI [−1.57, −0.01].</td></tr>
+    <tr><td>Kalman dynamic hedge (best in-sample)</td><td class="n">1.00 / 2.8%</td><td class="n">0.17 / 0.4%</td><td class="n neg">−6.1%</td><td class="n">97%</td><td class="why">The best in-sample of 55 variants, but deflated-Sharpe probability is 0.13. Point-in-time in-sample is about 0. It's really a 3-day reversal effect.</td></tr>
+    <tr><td>Avellaneda–Lee ETF residual</td><td class="n">0.05 / 0.1%</td><td class="n neg">−0.56 / −3.0%</td><td class="n neg">−16%</td><td class="n">—</td><td class="why">Turnover about 82x a year. Costs take about 4% a year.</td></tr>
+    <tr><td>Avellaneda–Lee, long stock / short ETF</td><td class="n">0.56 / 4.5%</td><td class="n">0.07 / 0.2%</td><td class="n neg">−10%</td><td class="n">—</td><td class="why">No single-name borrow risk. The edge vanished OOS.</td></tr>
+    <tr><td>Chen et al. monthly quasi-pairs</td><td class="n">0.35 / 4.9%</td><td class="n neg">−0.58 / −12.3%</td><td class="n neg">−58%</td><td class="n">—</td><td class="why">94% explained by short-term reversal. Alpha after reversal: −0.02% a month (t −0.12).</td></tr>
+    <tr><td>ETF pairs (44)</td><td class="n neg">−1.04</td><td class="n neg">−4.41</td><td class="n">—</td><td class="n">4–10%</td><td class="why">It picks near-identical funds like IVV/VOO, where the gap is tracking noise and costs dominate.</td></tr>
+    <tr><td>Classic 15 pairs (KO/PEP, V/MA, …)</td><td class="n">0.78 / 1.7%</td><td class="n">−0.02 / −0.1%</td><td class="n">—</td><td class="n">—</td><td class="why">Picked with hindsight, and still about zero OOS.</td></tr>
+    <tr><td>SPY buy-and-hold</td><td class="n">1.01 / 18.3%</td><td class="n">0.75 / 12.1%</td><td class="n neg">−24.5%</td><td class="n">—</td><td class="why">Benchmark.</td></tr>
+  </tbody>
+  <caption>Net of default costs, on committed capital ($1 long and $1 short per pair). Doubling costs pushes every stock method's OOS Sharpe below zero. Pairs books carry almost no market beta (|β| ≤ 0.03).</caption>
+</table></div>
+<div class="figs">
+  <figure><img src="{{PIMG_EQUITY}}" alt="Equity curves of each pairs method against SPY, 2017 to 2026."><figcaption>Every pairs method next to SPY. All are flat, while SPY compounds.</figcaption></figure>
+  <figure><img src="{{PIMG_SPREADS}}" alt="Spread z-score charts for three example pairs, with entry and exit markers, including the GM/TSLA blow-up."><figcaption>Example spreads: a clean convergence, a typical OOS trade, and GM/TSLA, which lost 56% of the leg in the TSLA squeeze.</figcaption></figure>
+</div>
+<section class="col">
+  <h3>Why trades failed</h3>
+  <ul>
+    <li><b>Earnings.</b> 72% of distance-method trades spanned an earnings date. Those averaged −1.2%, against +2.6% for trades that didn't. Skipping entries near earnings didn't fix it, because 50-day holds still hit the next report.</li>
+    <li><b>Real shocks.</b> Globe Life fell 53% on a short-seller report (Apr 2024). Edison International fell 12% on the LA wildfires (Jan 2025). PLTR gapped 24% on earnings (Jan 2025).</li>
+    <li><b>Survivorship flattered the in-sample results.</b> Using today's index list, cointegration showed an IS Sharpe of −0.23. The point-in-time list gives −1.03. Kalman's IS edge came largely from names like CVNA and PLTR before they joined the index.</li>
+    <li><b>Crash behavior.</b> In Feb–Mar 2020, distance pairs gained +2.7% while SPY fell 33.5%. In 2022 they gained +1.5% against SPY's −18.2%. So it works as a small hedge, but it pays nothing the rest of the time.</li>
+  </ul>
+  <h3>Account size</h3>
+  <p>Both account sizes are mechanically feasible on Alpaca. About 99% of the names it shorted are easy to borrow today, though that is today's flag, not a historical one. At $10k, whole shares leave legs 4–12% unbalanced, and 12–14% of signals can't be sized at all. At $100k the results match the fractional-share version, but returns stay at or below T-bill yields. Alpaca doesn't short fractional shares.</p>
+  <p class="dim">Files: <code>Pairs Research/</code> (papers_pairs.md, results/, out/, finalists.json). Caveats: slippage is assumed rather than measured; no interest is earned on cash or short proceeds, which matters at 4–5% T-bill yields; yearly index snapshots miss changes within the year; the classic pairs were picked with hindsight.</p>
+</section>
