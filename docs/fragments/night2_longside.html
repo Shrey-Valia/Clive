@@ -1,0 +1,24 @@
+<section class="col">
+  <h3>The overnight long sleeve is built and off</h3>
+  <p>It lives on branch <code>longside-overnight</code>. I'll merge it into the live folder after today's close, so today's v2 run uses only the reviewed code. 151 tests pass, up from 121. A fixture taken from the code before the change proves that with the flag off, the bot sends exactly the orders it sent before.</p>
+  <ul>
+    <li><b>Entry, 15:55 (after the cover-all):</b> buys v2's own picks, the same score-70+ / $10+ / $10M-ADV names saved for tomorrow's short.
+      <ul>
+        <li>Marketable limit at ask × 1.005, 5% per name, 25% long gross at most.</li>
+        <li>Skips names with dilution or offering headlines, and anything under $10.</li>
+        <li>Blocked whenever a halt is on.</li>
+      </ul></li>
+    <li><b>Exit, 09:31:</b> sells the long first, with up to 2 retry passes until 09:50. Only then does the v2 short of the same name go out. If a sell never fills, that name isn't shorted and a critical alert fires.</li>
+    <li><b>Safety:</b>
+      <ul>
+        <li>The cover-all never sells longs.</li>
+        <li>Turning the flag off overnight still sells any open longs.</li>
+        <li>Halts flatten longs too.</li>
+        <li>The monitor alerts on a long down 25%, or a long left open outside its window.</li>
+        <li>Each flip's fill is logged against the opening print and the midpoint, since that gap is the main risk.</li>
+      </ul></li>
+    <li><b>New data:</b> every 15:45 scan now logs each name's Alpaca easy-to-borrow flag to <code>logs/etb_history.csv</code>, so future penny research can use real borrow history.</li>
+    <li><b>Dry run today:</b> no long entries, because no name passed the v2 gates. With the gates loosened for the dry run only, it skipped three names under $10 and one with dilution news, and planned BUY ASST 14 @ ~$35.11 (4.8%).</li>
+  </ul>
+  <p><b>To enable:</b> set <code>OVERNIGHT_LONG_ENABLED = True</code> in <code>shortingbot/config.py</code> after the merge. No cron change is needed. At 5%, the worst overnight gap in the backtest (−71%) would cost about −3.6% of equity. It would be cleaner to turn it on after one v2-only day, so the v2 baseline stays readable.</p>
+</section>
