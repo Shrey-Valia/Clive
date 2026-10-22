@@ -59,17 +59,31 @@ export function etToDate(iso: string, mins: number): Date {
   return new Date(guess - (shown - guess));
 }
 
-export type NextRun = { kind: "SCAN" | "TRADE" | "SYNC"; at: Date; date: string };
+/** Which daily flow the shorting bot runs (short_runs.strategy_version). */
+export type Flow = "overnight_v1" | "intraday_v2";
+export const flowOf = (v: string | null | undefined): Flow => (v === "intraday_v2" ? "intraday_v2" : "overnight_v1");
+
+/** intraday_v2: scan 15:45 on T, short at the 09:31 open on T+1, cover 15:55 on T+1, sync after the close. */
+export function scheduleV2(iso: string) {
+  const c = closeMins(iso);
+  return { entry: 9 * 60 + 31, entryCutoff: 9 * 60 + 50, scan: c - 15, exit: c - 5, close: c, sync: c + 15 };
+}
+
+export type NextRun = { kind: "SCAN" | "TRADE" | "SYNC" | "ENTRY" | "EXIT"; at: Date; date: string };
+
+function steps(day: string, flow: Flow): [NextRun["kind"], number][] {
+  if (flow === "intraday_v2") { const s = scheduleV2(day); return [["ENTRY", s.entry], ["SCAN", s.scan], ["EXIT", s.exit], ["SYNC", s.sync]]; }
+  const s = schedule(day);
+  return [["SCAN", s.scan], ["TRADE", s.trade], ["SYNC", s.sync]];
+}
 
 /** Next scheduled bot event after `now`, knowing weekends and holidays. */
-export function nextRun(now: Date = new Date()): NextRun {
+export function nextRun(now: Date = new Date(), flow: Flow = "overnight_v1"): NextRun {
   const p = etParts(now);
   let day = p.date;
   for (let i = 0; i < 10; i++) {
     if (isTradingDay(day)) {
-      const s = schedule(day);
-      const steps: [NextRun["kind"], number][] = [["SCAN", s.scan], ["TRADE", s.trade], ["SYNC", s.sync]];
-      for (const [kind, m] of steps) {
+      for (const [kind, m] of steps(day, flow)) {
         const at = etToDate(day, m);
         if (at.getTime() > now.getTime()) return { kind, at, date: day };
       }
@@ -79,7 +93,7 @@ export function nextRun(now: Date = new Date()): NextRun {
   return { kind: "SCAN", at: etToDate(day, 945), date: day };
 }
 
-/** Next rotation (15:55 trade) after now. */
+/** Next book change: the 15:55 rotation (v1) or the 15:55 cover (v2). Both sit at close − 5. */
 export function nextRotation(now: Date = new Date()): Date {
   const p = etParts(now);
   let day = p.date;

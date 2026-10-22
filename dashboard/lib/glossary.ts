@@ -23,7 +23,7 @@ export const GLOSSARY: Record<string, string> = {
   SORTINO: "Like Sharpe but divides by downside deviation only.",
   PF: "Profit factor: gross winning $ ÷ gross losing $. Above 1 makes money.",
   CAGR: "Compound annual growth rate.",
-  ROTATION: "At 15:55 ET the bot covers yesterday's shorts and opens today's five with market orders.",
+  ROTATION: "overnight_v1: at 15:55 ET the bot covers yesterday's shorts and opens today's five. intraday_v2: picks from the 15:45 scan are shorted at the next 09:31 open and covered at 15:55 the same day.",
   "DRY RUN": "The bot scanned and picked but sent no orders. Picks read WOULD SHORT.",
   LIVE: "The bot sent real orders to the Alpaca paper account.",
   SLIP: "Slippage: fill price vs the scan's close. For a short, a lower fill is worse.",
@@ -65,6 +65,7 @@ export const CATALYST: Record<string, { label: string; tone: "good" | "bad" | "i
 export const RUN_LABEL: Record<string, string> = {
   executed: "EXECUTED", executed_with_errors: "EXECUTED · ERRORS", dry_run_done: "DRY RUN",
   scanned: "SCANNED", failed: "FAILED",
+  market_closed: "MARKET CLOSED", picks_saved: "PICKS SAVED", entered: "ENTERED", exited: "EXITED",
 };
 
 export const WEIGHTS = { move_volume: 35, crowding: 20, ftd: 10, catalyst: 35 } as const;

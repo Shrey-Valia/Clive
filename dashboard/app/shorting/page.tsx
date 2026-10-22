@@ -1,14 +1,17 @@
 import Link from "next/link";
 import { DrawdownChart, EquityChart, PnlBars, TradeReturnHistogram } from "@/components/Charts";
-import { Abbr, BotPill, Empty, FlagLegend, FlagTags, ModePill, NoAccess, PageHead, Panel, Sgn, Stat, Timeline, TodayBanner } from "@/components/Bits";
+import { Abbr, AlertsTable, BotPill, DirChip, Empty, FlagLegend, FlagTags, ModePill, NoAccess, PageHead, Panel, Sgn, Stat, Timeline, TodayBanner } from "@/components/Bits";
+import { EvChips, SampleTag } from "@/components/Events";
 import { ExposureBars, MonthlyReturnsHeatmap, ScanFunnel, ScoreBoard, ScoreLegend, Sparkline } from "@/components/Viz";
 import { ScanBoard } from "@/components/ScanBoard";
 import { Num } from "@/components/Live";
-import { getShorting } from "@/lib/data";
-import { attribute, dayTimeline, equitySeries, funnel, isLive, monthlyReturns, performance, risk, systemLog, todayState } from "@/lib/analytics";
+import { getEvents, getShorting } from "@/lib/data";
+import { attribute, dayTimeline, equitySeries, funnel, isLive, monthlyReturns, performance, risk, runFlow, systemLog, todayState, tradeDate } from "@/lib/analytics";
+import { companyEventsWithin } from "@/lib/events";
+import { etParts } from "@/lib/time";
 import { RUN_LABEL } from "@/lib/glossary";
 import { dayLabel, etDateOf, etHm, etTime, md, num, pct, usd, ymd } from "@/lib/format";
-import type { Trade } from "@/lib/types";
+import type { MarketEvent, Trade } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -16,13 +19,23 @@ const RANGES = { "7d": 7, "30d": 30, all: Infinity } as const;
 
 export default async function Shorting({ searchParams }: { searchParams: Promise<{ bl?: string }> }) {
   const sp = await searchParams;
-  const s = await getShorting();
+  const [s, ev] = await Promise.all([getShorting(), getEvents().catch(() => null)]);
   if (!s) return <NoAccess />;
   const { bot, run, runs, candidates, orders, snaps, trades, positions, account, simulated: sim } = s;
   const live = isLive(run);
   const now = new Date();
-  const today = todayState(run, orders, account, now);
-  const steps = dayTimeline(run, orders, snaps, now);
+  const ctx = { runs, bookOrders: s.bookOrders };
+  const today = todayState(run, orders, account, now, ctx);
+  const steps = dayTimeline(run, orders, snaps, now, { ...ctx, syncs: s.syncs, bot });
+  const v2 = runFlow(run) === "intraday_v2";
+  const todayEt = etParts(now).date;
+  // company events (earnings, calls, investor days, talks) within 2 sessions, for every pick and held name
+  const evBy: Record<string, MarketEvent[]> = {};
+  for (const t of new Set([...candidates.filter((c) => c.selected).map((c) => c.ticker), ...positions.map((p) => p.symbol)])) {
+    const hit = companyEventsWithin(ev?.events ?? [], t, todayEt, 2);
+    if (hit.length) evBy[t] = hit;
+  }
+  const flagged = Object.keys(evBy);
   const perf = performance(snaps, trades);
   const attr = attribute(trades, s.picks);
   const rk = risk(positions, account, new Map(s.held));
@@ -30,7 +43,7 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
   const equity = account ? Number(account.equity) : null;
   const openPl = positions.reduce((t, p) => t + Number(p.unrealized_pl), 0);
   const openBasis = positions.reduce((t, p) => t + Math.abs(Number(p.avg_entry_price) * Number(p.qty)), 0);
-  const log = systemLog(bot, runs, orders, snaps, s.events);
+  const log = systemLog(bot, runs, orders, snaps, s.events, s.syncs);
   const asOf = etHm(now.toISOString());
 
   // blotter, grouped by rotation (exit) day, filtered
@@ -48,17 +61,31 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
   return (
     <>
       <PageHead fn="SHRT" title="Stock Shorting Bot"
-        desc="Top 5 end-of-day gainer fades · sized 19% → 15% of equity · entered 15:55 ET with market orders · held to the next rotation"
+        desc={v2
+          ? "Top 5 end-of-day gainer fades · scanned 15:45 ET · shorted at the next session's 09:31 open · covered 15:55 the same day · sized 19% → 15% of equity"
+          : "Top 5 end-of-day gainer fades · sized 19% → 15% of equity · entered 15:55 ET with market orders · held to the next rotation"}
         right={<>{bot && <BotPill bot={bot} run={run} />}<ModePill run={run} big /></>}
         keys={[{ n: 95, label: "ALPACA", href: "https://app.alpaca.markets/paper/dashboard/overview", ext: true }, { n: 96, label: "EXPORT", href: "/shorting/export" }, { n: 97, label: "RUNS", href: "/shorting/runs" }]} />
 
       <TodayBanner t={today} />
       <Timeline steps={steps} />
+      {v2 && run && <div className="flowline small muted">FLOW <b className="val">INTRADAY_V2</b> · LATEST SCAN {dayLabel(run.run_date)} → TRADES {dayLabel(tradeDate(run))}{run.code_version ? <> · CODE <code>{run.code_version.slice(0, 8)}</code></> : null}</div>}
+      {flagged.length > 0 && (
+        <div className="empty line warn evflag" role="status">
+          <b>EVENT RISK ≤2 SESSIONS</b>{ev?.sample && <SampleTag />}
+          {flagged.map((t) => <span key={t}><a href={`#t=${t}`} className="amber b">{t}</a> <EvChips events={evBy[t]} /></span>)}
+        </div>
+      )}
+      {s.alerts.length > 0 && (
+        <Panel id="alerts" title="Open alerts" code="ALRT" meta={`${s.alerts.length} OPEN · FROM THE ALERTS TABLE${sim ? " · SAMPLE" : ""}`}>
+          <AlertsTable rows={s.alerts} />
+        </Panel>
+      )}
 
       {positions.length > 0 && (
         <div className="secstrip" aria-label="Held positions">
           {rk.rows.map((r) => (
-            <a key={r.ticker} href={`#t=${r.ticker}`} className="sec"><b>{r.ticker}</b><span>{r.pctEq.toFixed(1)}%</span><Sgn v={r.plpc} kind="pct" /></a>
+            <a key={r.ticker} href={`#t=${r.ticker}`} className="sec"><b>{r.ticker}</b><DirChip side={r.side} /><span>{r.pctEq.toFixed(1)}%</span><Sgn v={r.plpc} kind="pct" />{evBy[r.ticker] && <span className="evmark" title="Company event within 2 sessions">EVT</span>}</a>
           ))}
           {sim && <span className="simtag">SIMULATED</span>}
         </div>
@@ -79,27 +106,27 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
         {account === null ? (
           <Empty>Alpaca keys aren&apos;t set on the server. Add <code>APCA_API_KEY_ID</code> and <code>APCA_API_SECRET_KEY</code> in Vercel.</Empty>
         ) : positions.length === 0 ? (
-          <Empty>FLAT · NEXT FIVE SHORTS OPEN AT 15:55 ET{!live && run ? " · BOT IS IN DRY RUN, NOTHING WILL OPEN" : ""}</Empty>
+          <Empty>{v2 ? "FLAT · NEXT BOOK OPENS AT THE 09:31 ET OPEN" : "FLAT · NEXT FIVE SHORTS OPEN AT 15:55 ET"}{!live && run ? " · BOT IS IN DRY RUN, NOTHING WILL OPEN" : ""}</Empty>
         ) : (
           <>
             <div className="scroll desk-only"><table className="dense fit">
-              <thead><tr><th>Ticker</th><th>Side</th><th className="num">Qty</th><th className="num">Entry</th><th className="num">Last</th><th className="num">Notional</th><th className="num">% Eq</th><th className="num">Today</th><th className="num">Unrealized</th><th className="num">%</th><th className="fill" /></tr></thead>
+              <thead><tr><th>Ticker</th><th>Side</th><th className="num">Qty</th><th className="num">Entry</th><th className="num">Last</th><th className="num">Notional</th><th className="num">% Eq</th><th className="num">Today</th><th className="num">Unrealized</th><th className="num">%</th><th>Events ≤2 sessions</th><th className="fill" /></tr></thead>
               <tbody>{positions.map((p) => (
                 <tr key={p.symbol} data-ticker={p.symbol}>
-                  <td className="amber b">{p.symbol}</td><td>{p.side.toUpperCase()}</td>
+                  <td className="amber b">{p.symbol}</td><td><DirChip side={p.side} /></td>
                   <td className="num">{Math.abs(Number(p.qty))}</td><td className="num">{usd(p.avg_entry_price)}</td>
                   <td className="num">{usd(p.current_price)}</td><td className="num">{usd(Math.abs(Number(p.market_value)))}</td>
                   <td className="num">{equity ? pct((100 * Math.abs(Number(p.market_value))) / equity, 1) : "—"}</td>
                   <td className="num"><Sgn v={Number(p.unrealized_intraday_pl)} /></td>
                   <td className="num"><Sgn v={Number(p.unrealized_pl)} /></td>
-                  <td className="num"><Sgn v={Number(p.unrealized_plpc) * 100} kind="pct" /></td><td className="fill" />
+                  <td className="num"><Sgn v={Number(p.unrealized_plpc) * 100} kind="pct" /></td><td><EvChips events={evBy[p.symbol] ?? []} /></td><td className="fill" />
                 </tr>))}
               </tbody>
             </table></div>
             <div className="mob-only cards">
               {positions.map((p) => (
                 <div key={p.symbol} className="card" data-ticker={p.symbol}>
-                  <div className="card-top"><span className="b amber">{p.symbol}</span><span>{p.side.toUpperCase()} {Math.abs(Number(p.qty))}</span><Sgn v={Number(p.unrealized_pl)} /><Sgn v={Number(p.unrealized_plpc) * 100} kind="pct" /></div>
+                  <div className="card-top"><span className="b amber">{p.symbol}</span><DirChip side={p.side} /><span>{Math.abs(Number(p.qty))}</span>{evBy[p.symbol] && <EvChips events={evBy[p.symbol]} />}<Sgn v={Number(p.unrealized_pl)} /><Sgn v={Number(p.unrealized_plpc) * 100} kind="pct" /></div>
                   <div className="card-kv"><span>ENTRY <b>{usd(p.avg_entry_price)}</b></span><span>LAST <b>{usd(p.current_price)}</b></span><span>NOTIONAL <b>{usd(Math.abs(Number(p.market_value)), false, 0)}</b></span><span>% EQ <b>{equity ? pct((100 * Math.abs(Number(p.market_value))) / equity, 1) : "—"}</b></span></div>
                 </div>
               ))}
@@ -115,7 +142,7 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
           <>
             {!live && <div className="dryband">DRY RUN · NO ORDERS WERE SENT · PICKS READ <b>WOULD SHORT</b></div>}
             <div className="legendrow"><ScoreLegend /><FlagLegend /></div>
-            <ScanBoard candidates={candidates} live={live} />
+            <ScanBoard candidates={candidates} live={live} events={evBy} />
           </>
         )}
         {orders.length > 0 && (
@@ -144,7 +171,7 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
         </div>
       )}
 
-      <Panel n={5} id="risk" title="Risk" code="RISK" sim={sim} meta={`AS OF ${asOf} ET · GAP = OVERNIGHT MOVE AGAINST EVERY SHORT`}>
+      <Panel n={5} id="risk" title="Risk" code="RISK" sim={sim} meta={`AS OF ${asOf} ET · GAP = A MOVE AGAINST EVERY POSITION`}>
         {!positions.length ? <Empty>FLAT · NO OPEN RISK</Empty> : (
           <div className="riskgrid">
             <div className="stats inner">
@@ -156,9 +183,9 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
             </div>
             <ExposureBars equity={rk.equity} rows={rk.rows.map((r) => ({ ticker: r.ticker, marketValue: r.mv, targetPct: r.targetPct, unrealizedPl: r.unrealized, unrealizedPlpc: r.plpc }))} />
             <div className="scroll"><table className="dense fit">
-              <thead><tr><th>Held</th><th>Sector</th><th className="num"><Abbr term="SI%">SI%</Abbr></th><th className="num"><Abbr term="DTC">DTC</Abbr></th><th>Flags</th><th>Entry run</th><th className="fill" /></tr></thead>
+              <thead><tr><th>Held</th><th>Side</th><th>Sector</th><th className="num"><Abbr term="SI%">SI%</Abbr></th><th className="num"><Abbr term="DTC">DTC</Abbr></th><th>Flags</th><th>Entry run</th><th className="fill" /></tr></thead>
               <tbody>{rk.rows.map((r) => (
-                <tr key={r.ticker} data-ticker={r.ticker}><td className="amber">{r.ticker}</td><td className="small">{(r.sector ?? "—").toUpperCase()}</td>
+                <tr key={r.ticker} data-ticker={r.ticker}><td className="amber">{r.ticker}</td><td><DirChip side={r.side} /></td><td className="small">{(r.sector ?? "—").toUpperCase()}</td>
                   <td className="num">{pct(r.si)}</td><td className="num">{num(r.dtc)}</td><td><FlagTags flags={r.flags} /></td><td>{r.entryRun ? ymd(r.entryRun) : <span className="muted">NOT IN A RECENT RUN</span>}</td><td className="fill" /></tr>
               ))}</tbody>
             </table></div>
@@ -189,7 +216,7 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
             <TradeReturnHistogram trades={trades} ariaLabel="Distribution of closed trade returns" />
           </div>
           <div>
-            <h3 className="subhead">P&amp;L BY RANK SLOT <span className="muted">· {attr.matched}/{trades.length} TRADES MATCHED TO A PICK BY TICKER + DATE</span></h3>
+            <h3 className="subhead">P&amp;L BY RANK SLOT <span className="muted">· {attr.matched}/{trades.length} TRADES MATCHED TO A PICK{attr.byRunId ? ` · ${attr.byRunId} BY RUN_ID, REST BY TICKER + DATE` : " BY TICKER + DATE"}</span></h3>
             {attr.byRank.length === 0 ? <Empty>NO TRADES MATCHED TO A RUN YET</Empty> : (
               <div className="scroll"><table className="dense">
                 <thead><tr><th>Slot</th><th className="num">N</th><th className="num">P&amp;L</th><th className="num">Avg</th><th className="num">Win</th></tr></thead>
@@ -231,7 +258,7 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
         meta={<>{(["7d", "30d", "all"] as const).map((r) => <Link key={r} href={`?bl=${r}#p10`} scroll={false} className={`seg${range === r ? " on" : ""}`}>{r.toUpperCase()}</Link>)}
           {daysAsc.length > 1 && <Sparkline values={daysAsc.map((d) => cum.get(d)!)} baseline={0} ariaLabel="Cumulative realized P&L" />}</>}>
         {trades.length === 0 ? (
-          <Empty>NO CLOSED TRADES · TODAY&apos;S SHORTS CLOSE AT TOMORROW&apos;S 15:55 ROTATION</Empty>
+          <Empty>{v2 ? "NO CLOSED TRADES · A BOOK CLOSES AT 15:55 ON THE DAY IT OPENS" : <>NO CLOSED TRADES · TODAY&apos;S SHORTS CLOSE AT TOMORROW&apos;S 15:55 ROTATION</>}</Empty>
         ) : (
           <div className="scroll"><table className="dense fit">
             <thead><tr><th>Ticker</th><th>Side</th><th className="num">Qty</th><th>Entry ET</th><th className="num">Entry px</th><th>Exit ET</th><th className="num">Exit px</th><th className="num">P&amp;L</th><th className="num">%</th><th className="fill" /></tr></thead>
@@ -239,10 +266,10 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
               const ts = byDay.get(d)!;
               const sub = ts.reduce((a, t) => a + t.pnl, 0);
               return [
-                <tr key={d} className="group"><td colSpan={7}>ROTATION {dayLabel(d)} · {ts.length} TRADES · CUM <Sgn v={cum.get(d)!} /></td><td className="num"><Sgn v={sub} /></td><td /><td className="fill" /></tr>,
+                <tr key={d} className="group"><td colSpan={7}>{v2 ? "EXIT" : "ROTATION"} {dayLabel(d)} · {ts.length} TRADES · CUM <Sgn v={cum.get(d)!} /></td><td className="num"><Sgn v={sub} /></td><td /><td className="fill" /></tr>,
                 ...ts.map((x) => (
                   <tr key={x.id} data-ticker={x.ticker}>
-                    <td className="amber">{x.ticker}</td><td>{x.side.toUpperCase()}</td><td className="num">{x.qty}</td>
+                    <td className="amber">{x.ticker}</td><td><DirChip side={x.side} /></td><td className="num">{x.qty}</td>
                     <td>{etTime(x.entry_at)}</td><td className="num">{usd(x.entry_price)}</td>
                     <td>{etTime(x.exit_at)}</td><td className="num">{usd(x.exit_price)}</td>
                     <td className="num"><Sgn v={x.pnl} /></td><td className="num"><Sgn v={x.pnl_pct} kind="pct" digits={2} /></td><td className="fill" />
@@ -254,7 +281,7 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
         )}
       </Panel>
 
-      <Panel n={11} id="log" title="System log" code="LOG" meta="RUNS · ORDER ERRORS · SYNC · HEARTBEAT">
+      <Panel n={11} id="log" title="System log" code="LOG" meta={`${s.events.length ? "RUN_EVENTS · " : ""}RUNS · ORDER ERRORS · ${s.syncs.length ? "SYNC_RUNS" : "SYNC"} · HEARTBEAT`}>
         {log.length === 0 ? <Empty>NO EVENTS YET</Empty> : (
           <ol className="syslog">{log.map((l, i) => (
             <li key={i} className={l.level.toLowerCase()}><time>{etTime(l.at)}</time><b>{l.level}</b><span className="step">{l.step}</span><span>{l.message}</span></li>

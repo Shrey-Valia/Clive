@@ -2,16 +2,22 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import time
 from zoneinfo import ZoneInfo
 
+from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest
+from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, MarketOrderRequest
+from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, StopOrderRequest
 
 from . import config
 
+log = logging.getLogger("shortingbot")
 ET = ZoneInfo(config.MARKET_TZ)
 
 
@@ -46,13 +52,22 @@ def client() -> TradingClient:
     return _client
 
 
+def _num(v):
+    return float(v) if v not in (None, "") else None
+
+
 def account() -> dict:
+    """Account numbers. The PDT fields are None when Alpaca doesn't report them
+    (the paper account currently omits all three)."""
     a = client().get_account()
     return {
         "equity": float(a.equity), "cash": float(a.cash), "last_equity": float(a.last_equity),
         "buying_power": float(a.buying_power), "long_market_value": float(a.long_market_value),
         "short_market_value": float(a.short_market_value),
         "shorting_enabled": bool(a.shorting_enabled), "blocked": bool(a.trading_blocked),
+        "pattern_day_trader": a.pattern_day_trader,
+        "daytrading_buying_power": _num(a.daytrading_buying_power),
+        "daytrade_count": int(a.daytrade_count) if a.daytrade_count is not None else None,
     }
 
 
@@ -82,24 +97,44 @@ def borrow(tickers: list[str]) -> dict[str, dict]:
     return out
 
 
+def _as_et(day: dt.date, v) -> dt.datetime:
+    if isinstance(v, dt.datetime):
+        return v.replace(tzinfo=ET) if v.tzinfo is None else v.astimezone(ET)
+    return dt.datetime.combine(day, v, ET)
+
+
+def sessions(start: dt.date, end: dt.date) -> list[tuple[dt.date, dt.datetime, dt.datetime]]:
+    """[(date, open, close)] from Alpaca's exchange calendar. Half days carry their early close."""
+    cal = client().get_calendar(GetCalendarRequest(start=start, end=end))
+    return [(d.date, _as_et(d.date, d.open), _as_et(d.date, d.close)) for d in cal]
+
+
 def session_today() -> tuple[dt.datetime, dt.datetime] | None:
     """(open, close) in ET for today, or None when the market is closed."""
     today = dt.datetime.now(ET).date()
-    cal = client().get_calendar(GetCalendarRequest(start=today, end=today))
-    if not cal or cal[0].date != today:
+    cal = sessions(today, today)
+    if not cal or cal[0][0] != today:
         return None
-    day = cal[0]
-
-    def as_et(v):
-        if isinstance(v, dt.datetime):
-            return v.replace(tzinfo=ET) if v.tzinfo is None else v.astimezone(ET)
-        return dt.datetime.combine(today, v, ET)
-
-    return as_et(day.open), as_et(day.close)
+    return cal[0][1], cal[0][2]
 
 
-def cancel_open_orders() -> int:
+def next_session(after: dt.date) -> dt.date | None:
+    """The first trading day after `after`: where today's picks get traded."""
+    later = [d for d, _, _ in sessions(after + dt.timedelta(days=1), after + dt.timedelta(days=10)) if d > after]
+    return later[0] if later else None
+
+
+def prev_session(before: dt.date) -> dt.date | None:
+    """The last trading day before `before`: when the picks being entered were scanned."""
+    earlier = [d for d, _, _ in sessions(before - dt.timedelta(days=10), before - dt.timedelta(days=1)) if d < before]
+    return earlier[-1] if earlier else None
+
+
+def cancel_open_orders(symbols: list[str] | None = None) -> int:
+    """Cancel open orders, all of them or only those on `symbols`."""
     open_orders = client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+    if symbols is not None:
+        open_orders = [o for o in open_orders if o.symbol in set(symbols)]
     for o in open_orders:
         client().cancel_order_by_id(o.id)
     return len(open_orders)
@@ -114,6 +149,48 @@ def submit(ticker: str, qty: int, side: str) -> dict:
     return order_dict(o)
 
 
+def submit_stop(ticker: str, qty: int, stop_price: float) -> dict:
+    """Protective DAY buy-stop for a short. DAY so it dies at the close even if never cancelled."""
+    o = client().submit_order(StopOrderRequest(
+        symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, stop_price=stop_price))
+    return order_dict(o)
+
+
+def wait_no_open_orders(symbols: list[str], seconds: int = 10) -> bool:
+    """After a cancel: poll until no order on `symbols` is still open (a stop may fill instead)."""
+    deadline = time.time() + seconds
+    while True:
+        open_orders = [o for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+                       if o.symbol in set(symbols)]
+        if not open_orders:
+            return True
+        if time.time() > deadline:
+            return False
+        time.sleep(1)
+
+
+def day_trade_count(sessions_back: int = 5) -> int | None:
+    """Day trades in the last `sessions_back` sessions, today included: Alpaca's daytrade_count
+    when reported, else rebuilt from fills (a symbol bought and sold on the same day = 1).
+    None when neither is available."""
+    try:
+        reported = account()["daytrade_count"]
+        if reported is not None:
+            return reported
+        today = dt.datetime.now(ET).date()
+        days = [d for d, _, _ in sessions(today - dt.timedelta(days=14), today) if d <= today][-sessions_back:]
+        if not days:
+            return None
+        sides: dict[tuple, set] = {}
+        for f in fills(days[0].isoformat()):
+            day = dt.datetime.fromisoformat(f["transaction_time"].replace("Z", "+00:00")).astimezone(ET).date()
+            sides.setdefault((day, f["symbol"]), set()).add("buy" if f["side"] == "buy" else "sell")
+        return sum(1 for (d, _), s in sides.items() if d in days and len(s) == 2)
+    except Exception as e:
+        log.warning("day trade count failed: %s", e)
+        return None
+
+
 def order_dict(o) -> dict:
     return {
         "id": str(o.id), "ticker": o.symbol, "side": o.side.value, "qty": float(o.qty or 0),
@@ -121,6 +198,7 @@ def order_dict(o) -> dict:
         "filled_qty": float(o.filled_qty or 0),
         "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price else None,
         "filled_at": o.filled_at.isoformat() if o.filled_at else None,
+        "stop_price": float(o.stop_price) if getattr(o, "stop_price", None) else None,
     }
 
 
@@ -152,3 +230,68 @@ def fills(after: str) -> list[dict]:
         if len(page) < 100:
             return out
         token = page[-1]["id"]
+
+
+# ---------------------------------------------------------------- market data (read-only)
+_data: StockHistoricalDataClient | None = None
+
+
+def data_client() -> StockHistoricalDataClient:
+    global _data
+    if _data is None:
+        client()                                  # same key checks
+        _data = StockHistoricalDataClient(os.environ["APCA_API_KEY_ID"], os.environ["APCA_API_SECRET_KEY"])
+    return _data
+
+
+def adv20(tickers: list[str]) -> dict[str, dict]:
+    """{ticker: {"adv20_usd": mean(close * volume)}} over the last ADV20_DAYS daily bars before
+    today, unadjusted SIP bars as in the backtest. SIP on the free plan only serves data older
+    than 15 minutes, which is all this needs. Missing on any error, so the gate excludes."""
+    if not tickers:
+        return {}
+    today = dt.datetime.now(ET).date()
+    start = dt.datetime.combine(today - dt.timedelta(days=45), dt.time(), ET)
+    end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=16)
+    try:
+        bars = data_client().get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=tickers, timeframe=TimeFrame.Day, start=start, end=end,
+            feed=DataFeed.SIP, adjustment=Adjustment.RAW)).data
+    except Exception as e:
+        log.warning("adv20: Alpaca daily bars failed: %s", e)
+        return {}
+    out = {}
+    for t, rows in bars.items():
+        dv = [b.close * b.volume for b in rows if b.timestamp.astimezone(ET).date() < today][-config.ADV20_DAYS:]
+        if len(dv) >= config.ADV20_MIN_DAYS:
+            out[t] = {"adv20_usd": round(sum(dv) / len(dv), 0)}
+    return out
+
+
+def last_prices(tickers: list[str], today_only: bool = True) -> dict[str, float | None]:
+    """Latest IEX trade per ticker, today's only, falling back to the quote midpoint.
+    IEX because the free plan has no real-time SIP. None when neither exists.
+    today_only=False lets a dry run outside market hours see yesterday's last print."""
+    out = {t: None for t in tickers}
+    if not tickers:
+        return out
+    today = dt.datetime.now(ET).date()
+    try:
+        trades = data_client().get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=tickers, feed=DataFeed.IEX))
+        for t, tr in trades.items():
+            if tr and tr.price and (not today_only or tr.timestamp.astimezone(ET).date() == today):
+                out[t] = float(tr.price)
+    except Exception as e:
+        log.warning("latest trades failed: %s", e)
+    missing = [t for t, v in out.items() if v is None]
+    if missing:
+        try:
+            quotes = data_client().get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=missing, feed=DataFeed.IEX))
+            for t, q in quotes.items():
+                if q and q.bid_price and q.ask_price and (not today_only or q.timestamp.astimezone(ET).date() == today):
+                    out[t] = round((float(q.bid_price) + float(q.ask_price)) / 2, 4)
+        except Exception as e:
+            log.warning("latest quotes failed: %s", e)
+    return out

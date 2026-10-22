@@ -1,4 +1,5 @@
-import type { Candidate } from "@/lib/types";
+import type { Candidate, MarketEvent } from "@/lib/types";
+import { EvChips } from "@/components/Events";
 import { CATALYST } from "@/lib/glossary";
 import { compact, num, pct, usd } from "@/lib/format";
 import { Abbr, FlagTags, ScoreCell } from "@/components/Bits";
@@ -25,7 +26,8 @@ function News({ c }: { c: Candidate }) {
   return k ? <span className={k.tone === "bad" ? "neg" : k.tone === "good" ? "val" : "muted"}>{k.label}</span> : <span className="muted">—</span>;
 }
 
-export function ScanBoard({ candidates, live }: { candidates: Candidate[]; live: boolean }) {
+/** `events`: company events within 2 sessions, by ticker (shown beside the ticker). */
+export function ScanBoard({ candidates, live, events = {} }: { candidates: Candidate[]; live: boolean; events?: Record<string, MarketEvent[]> }) {
   const picked = candidates.filter((c) => c.selected).sort((a, b) => a.rank - b.rank);
   const eligible = candidates.filter((c) => !c.selected && !c.exclude_reason).sort((a, b) => b.short_score - a.short_score);
   const excluded = candidates.filter((c) => !c.selected && c.exclude_reason).sort((a, b) => b.short_score - a.short_score);
@@ -54,7 +56,7 @@ export function ScanBoard({ candidates, live }: { candidates: Candidate[]; live:
               ...rows.map((c) => (
                 <tr key={c.ticker} data-ticker={c.ticker} className={c.selected ? "picked" : c.exclude_reason ? "excluded" : ""}>
                   <td className="num muted">{c.rank}</td>
-                  <td className="tk"><Candle prev={c.prev_close} close={c.close} high={c.high} low={c.low} /><span className={c.selected ? "amber b" : "b"}>{c.ticker}</span></td>
+                  <td className="tk"><Candle prev={c.prev_close} close={c.close} high={c.high} low={c.low} /><span className={c.selected ? "amber b" : "b"}>{c.ticker}</span>{events[c.ticker] && <EvChips events={events[c.ticker]} />}</td>
                   <td className="num">{compact(c.market_cap)}</td>
                   <td className="num">{usd(c.close)}</td>
                   <td className="num pos">{pct(c.change, 1, true)}</td>
@@ -82,13 +84,13 @@ export function ScanBoard({ candidates, live }: { candidates: Candidate[]; live:
         {groups.slice(0, 2).map(([label, rows]) => rows.length > 0 && (
           <div key={label} className="cardgroup">
             <div className="cg-head">{label} · {rows.length}</div>
-            {rows.map((c) => <PickCard key={c.ticker} c={c} live={live} />)}
+            {rows.map((c) => <PickCard key={c.ticker} c={c} live={live} ev={events[c.ticker]} />)}
           </div>
         ))}
         {excluded.length > 0 && (
           <details className="cardgroup">
             <summary className="cg-head">EXCLUDED · {excluded.length} <span className="muted">TAP TO SHOW</span></summary>
-            {excluded.map((c) => <PickCard key={c.ticker} c={c} live={live} />)}
+            {excluded.map((c) => <PickCard key={c.ticker} c={c} live={live} ev={events[c.ticker]} />)}
           </details>
         )}
       </div>
@@ -96,11 +98,12 @@ export function ScanBoard({ candidates, live }: { candidates: Candidate[]; live:
   );
 }
 
-function PickCard({ c, live }: { c: Candidate; live: boolean }) {
+function PickCard({ c, live, ev }: { c: Candidate; live: boolean; ev?: MarketEvent[] }) {
   return (
     <div className={`card${c.selected ? " picked" : ""}${c.exclude_reason ? " excluded" : ""}`} data-ticker={c.ticker}>
       <div className="card-top">
         <span className="b amber">{c.ticker}</span>
+        {ev && <EvChips events={ev} />}
         <span className="pos">{pct(c.change, 1, true)}</span>
         <span className="muted">{usd(c.close)}</span>
         <span className="card-score" style={{ background: `rgba(255,160,40,${(Math.max(0, Math.min(1, (c.short_score - 30) / 70)) * 0.35).toFixed(3)})` }}>{c.short_score.toFixed(1)}</span>

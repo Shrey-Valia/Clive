@@ -3,13 +3,13 @@ import { redirect } from "next/navigation";
 import { Abbr, Empty, NoAccess, PageHead, Panel, Sgn, Stat } from "@/components/Bits";
 import { Sparkline } from "@/components/Viz";
 import { getRuns } from "@/lib/data";
-import { runRows } from "@/lib/analytics";
+import { runFlow, runRows, runTone, tradeDate } from "@/lib/analytics";
 import { RUN_LABEL } from "@/lib/glossary";
 import { dayLabel, etHm, ymd } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
-const tone = (s: string) => (s === "failed" ? "bad" : s === "executed_with_errors" ? "warn" : s === "executed" ? "ok" : "off");
+const tone = runTone;
 
 export default async function Runs({ searchParams }: { searchParams: Promise<{ d?: string }> }) {
   const sp = await searchParams;
@@ -41,11 +41,12 @@ export default async function Runs({ searchParams }: { searchParams: Promise<{ d
       <Panel n={1} hot title="Runs" code="RUNS" sim={r.simulated} meta="NEWEST FIRST · CLICK A ROW FOR THE DRILL-DOWN">
         {rows.length === 0 ? <Empty>NO RUNS YET · FIRST SCAN 15:45 ET</Empty> : (
           <div className="scroll"><table className="dense fit runs">
-            <thead><tr><th>Date</th><th>Mode</th><th>Status</th><th>Start ET</th><th className="num">Scanned</th><th className="num">Picked</th><th className="num">Orders</th><th className="num">Filled</th><th className="num">Rej</th>
+            <thead><tr><th>Scan date</th><th>Trades</th><th>Mode</th><th>Status</th><th>Start ET</th><th className="num">Scanned</th><th className="num">Picked</th><th className="num">Orders</th><th className="num">Filled</th><th className="num">Rej</th>
               <th className="num"><Abbr term="ROTATION">Next-day P&amp;L</Abbr></th><th>Message</th><th className="fill" /></tr></thead>
             <tbody>{rows.map((x) => (
               <tr key={x.id} className={x.status === "failed" ? "failrow" : ""}>
                 <td><Link href={`/shorting/runs/${x.id}`} className="b">{dayLabel(x.run_date)}</Link> <span className="muted small">{ymd(x.run_date).slice(6)}</span></td>
+                <td className="small">{runFlow(x) === "intraday_v2" ? <>{dayLabel(tradeDate(x))} <span className="muted">09:31→15:55</span></> : <span className="muted">15:55→NEXT 15:55</span>}</td>
                 <td>{x.mode === "execute" ? <span className="mode live">LIVE</span> : <span className="mode dry">DRY</span>}</td>
                 <td><span className={`pill ${tone(x.status)}`}>{RUN_LABEL[x.status] ?? x.status.toUpperCase()}</span></td>
                 <td>{etHm(x.started_at)}</td>
@@ -57,7 +58,9 @@ export default async function Runs({ searchParams }: { searchParams: Promise<{ d
             ))}</tbody>
           </table></div>
         )}
-        <p className="note">Next-day P&amp;L joins closed trades to the run whose date equals the trade&apos;s ET entry date (short_trades has no run_id yet).</p>
+        <p className="note">{rows.some((x) => x.joinedBy === "run_id")
+          ? <>P&amp;L joins closed trades to their run by <code>short_trades.run_id</code>; older trades without it fall back to the ET entry date.</>
+          : <>P&amp;L joins closed trades to the run whose entry date (scan day for overnight_v1, the next session for intraday_v2) equals the trade&apos;s ET entry date. <code>short_trades.run_id</code> takes over once the bot fills it.</>}</p>
       </Panel>
     </>
   );

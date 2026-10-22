@@ -14,10 +14,41 @@ SCAN_POOL = 100                  # rows pulled from TradingView before filtering
 TOP_N = 20                       # gainers that get analysed
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
+# ---------------------------------------------------------------- strategy
+# Which jobs daily.py runs, in order. One entry per strategy, so a long side can be
+# added later without touching the short side.
+#   "short_intraday"   v2: scan at 15:45 on T, short at the T+1 open, cover at T+1 15:55
+#   "short_overnight"  v1: scan at 15:45, cover yesterday's and short the new top 5 at 15:55,
+#                      hold overnight. Off: the 2016-2026 backtest lost money in 10 of 11 years
+#                      (research/PROPOSAL.md). To switch back see the README.
+STRATEGIES = ["short_intraday"]
+STRATEGY_VERSION = "intraday_v2"         # written to every short_runs row
+
+# ---------------------------------------------------------------- selection gates (research/PROPOSAL.md)
+MIN_SHORT_SCORE = 70.0           # trade only names scoring >= this; fewer than 5 (or none) is fine. v1: 0
+MIN_PRICE_AT_SCAN = 10.00        # 15:45 price >= this. v1: 0 (MIN_PREV_CLOSE was the only price gate)
+MIN_ADV20_USD = 10_000_000       # 20-day average dollar volume, Alpaca daily bars, today excluded. v1: 0
+ADV20_DAYS = 20
+ADV20_MIN_DAYS = 10              # fewer bars than this -> no ADV20 -> excluded (as in the backtest)
+
 # ---------------------------------------------------------------- execution
 N_POSITIONS = 5
-SIZE_PCT_MAX = 19.0              # rank 1 gets this % of equity
-SIZE_PCT_MIN = 15.0              # rank N gets this %, linear in between
+SIZE_PCT_PER_NAME = 10.0         # equal size per name, % of equity. The one sizing knob in v2.
+                                 # None = linear from SIZE_PCT_MAX (rank 1) to SIZE_PCT_MIN (rank N), as v1
+SIZE_PCT_MAX = SIZE_PCT_PER_NAME # v1: 19.0 (with SIZE_PCT_PER_NAME = None)
+SIZE_PCT_MIN = SIZE_PCT_PER_NAME # v1: 15.0
+MAX_GROSS_PCT = 50.0             # total short notional never above this % of equity. v1: 100
+
+# Broker-side protective stop on each 09:31 short: a DAY buy-stop at fill x (1 + pct/100),
+# cancelled before the 15:55 cover. None = off (owner-approved default; the backtest found
+# stops lowered Sharpe). DAY, not GTC, so a stop can never outlive the cover and open a long.
+BROKER_STOP_PCT = None           # e.g. 35
+
+# Account-level halts. None = off.
+DAILY_LOSS_HALT_PCT = None       # account down this % on the day (equity vs last_equity): flatten,
+                                 # no new entries for the rest of the day. Checked at 09:31 and by monitor.py
+DRAWDOWN_HALT_PCT = None         # equity this % under its peak (logs/equity_peak.json): no new entries
+# State: logs/halt.json (today's halt) and logs/equity_peak.json. Delete the peak file to reset it.
 MARKET_TZ = "America/New_York"
 # Times are relative to the exchange calendar's close, so half days
 # (13:00 close) shift automatically: scan 12:45, trade 12:55.
@@ -25,6 +56,29 @@ SCAN_MINUTES_BEFORE_CLOSE = 15   # scrape + score at 15:45
 TRADE_MINUTES_BEFORE_CLOSE = 5   # flatten + enter at 15:55
 CUTOFF_MINUTES_BEFORE_CLOSE = 2  # refuse to send orders after 15:58
 FILL_WAIT_SECONDS = 30           # wait this long for covers to fill before shorting
+SCAN_TIMEOUT_SECONDS = 25 * 60   # v2 scan runs beside the 15:55 cover; give up on it after this
+
+# Next-open entry (v2). cron starts `daily.py --open --execute` at 09:31.
+PICKS_FILE = os.path.join(LOG_DIR, "next_open_picks.json")
+ENTRY_MINUTES_AFTER_OPEN = 1     # short at 09:31
+ENTRY_CUTOFF_MINUTES_AFTER_OPEN = 20   # a late start (Mac asleep) enters nothing after 09:50
+MAX_GAP_UP_PCT = 40.0            # skip a pick that opens more than this % above its scan price
+
+# Pattern day trader rule. FINRA retired it (Rule 4210 amendments, effective 2026-06-04) and
+# Alpaca replaced it with intraday margin; the paper account no longer reports
+# pattern_day_trader / daytrade_count / daytrading_buying_power. Each v2 round trip is a day
+# trade, so the old cap is kept as a fallback:
+#   "auto"    apply the cap only if the account reports PDT restrictions (pattern_day_trader true,
+#             a daytrade_count under PDT_MIN_EQUITY, daytrading_buying_power at 0), or once an
+#             order has been rejected for a PDT reason (logs/pdt_detected.json; delete to reset)
+#   "always"  always apply it      "never"  never apply it
+# With the cap on and equity under PDT_MIN_EQUITY, the 09:31 job enters at most
+# PDT_MAX_DAY_TRADES - (day trades in the last 5 sessions) names, in rank order, so every short
+# can be covered the same day; unknown count -> nothing. At ~$10k that is ~3 trades per 5 sessions.
+PDT_ENFORCE = "auto"
+PDT_MIN_EQUITY = 25_000
+PDT_MAX_DAY_TRADES = 3           # day trades allowed in 5 sessions under PDT_MIN_EQUITY
+PDT_OVERFLOW = "skip"            # picks over the allowance are skipped. ("hold_overnight" is not built)
 # Fresh start: fills before this date (the first bot's) are ignored.
 TRACK_FROM = "2026-10-21"
 
@@ -33,7 +87,7 @@ TRACK_FROM = "2026-10-21"
 WEIGHTS = {
     "move_volume": 35,   # 1. blow-off: big % up on heavy volume, upper wick, weak close
     "crowding": 20,      # 2. moderate SI / low DTC - shorts can exit, no squeeze fuel
-    "ftd": 10,           # 4. no repeated giant fails-to-deliver
+    "ftd": 0,            # 4. no repeated giant fails-to-deliver. 0: no signal in the backtest (v1: 10)
     "catalyst": 35,      # 5. hype > substance
 }
 # 3. borrow is a hard gate (Alpaca shortable + easy_to_borrow), not a weight.
@@ -62,6 +116,12 @@ FTD_DAYS_RAMP = (3, 15)               # days with FTDs in the window
 # 5. Catalyst
 CATALYST_EXCLUDE = True          # strong de-risking news excludes the name outright
 NEWS_LOOKBACK_HOURS = 36
+
+# ---------------------------------------------------------------- monitor.py (alerts only, never trades)
+ALERT_POSITION_LOSS_PCT = 25.0   # a position this % against us
+ALERT_BOOK_LOSS_PCT = 5.0        # open positions down this % of equity in total
+MONITOR_START = (9, 45)          # ET window monitor.py acts in; cron fires */15 9-15
+MONITOR_END = (15, 45)
 
 # ---------------------------------------------------------------- data
 SHORT_VOLUME_LOOKBACK_DAYS = 10

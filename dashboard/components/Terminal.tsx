@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { countdown, etParts, marketState, nextRun } from "@/lib/time";
+import { countdown, etParts, marketState, nextRun, type Flow } from "@/lib/time";
 
 const KEYS = [
   { key: "F1", n: "1", g: "h", code: "HOME", href: "/", label: "Overview" },
   { key: "F2", n: "2", g: "s", code: "SHRT", href: "/shorting", label: "Shorting" },
   { key: "F3", n: "3", g: "r", code: "RUNS", href: "/shorting/runs", label: "Run history" },
-  { key: "F4", n: "4", g: "o", code: "BT", href: "/options", label: "Options lab" },
+  { key: "F4", n: "4", g: "o", code: "OPTN", href: "/options", label: "Options" },
+  { key: "F5", n: "5", g: "e", code: "EVT", href: "/events", label: "Events" },
 ];
 const SECONDARY = [{ g: "l", code: "LUCD", href: "/lucid", label: "Lucid (inactive)" }];
 
@@ -22,12 +23,17 @@ const COMMANDS: Cmd[] = [
   { word: "RISK", desc: "Risk panel: gross, gap scenarios", href: "/shorting#risk" },
   { word: "PERF", desc: "Performance panel", href: "/shorting#perf" },
   { word: "LOG", desc: "System log", href: "/shorting#log" },
-  { word: "BT", desc: "Options backtest lab", href: "/options" },
-  { word: "OPTN", desc: "Options backtest lab", href: "/options" },
+  { word: "BT", desc: "Options backtest lab", href: "/options#lab" },
+  { word: "OPTN", desc: "Options bot: live paper + backtest lab", href: "/options" },
+  { word: "EVT", desc: "Market events: Fed, CPI/jobs, earnings, opex, holidays", href: "/events" },
+  { word: "CAL", desc: "Events month calendar", href: "/events#cal" },
+  { word: "FOMC", desc: "FOMC decisions, press conferences and minutes", href: "/events?k=FOMC" },
+  { word: "ALRT", desc: "Open bot alerts", href: "/shorting#alerts" },
   { word: "LUCD", desc: "Lucid bot (inactive)", href: "/lucid" },
   { word: "HELP", desc: "List commands and keys" },
 ];
-const ALIASES: Record<string, string> = { OV: "HOME", SHORT: "SHRT", SHORTING: "SHRT", LUCID: "LUCD", OPT: "OPTN", OPTIONS: "OPTN", HISTORY: "RUNS", "?": "HELP" };
+const ALIASES: Record<string, string> = { OV: "HOME", SHORT: "SHRT", SHORTING: "SHRT", LUCID: "LUCD", OPT: "OPTN", OPTIONS: "OPTN", HISTORY: "RUNS", "?": "HELP",
+  EVENTS: "EVT", EVTS: "EVT", ECO: "EVT", CALENDAR: "CAL", FED: "FOMC", ALERTS: "ALRT" };
 
 function flash(el: Element | null) {
   if (!el) return false;
@@ -53,7 +59,7 @@ function useNow() {
   return now;
 }
 
-export function TopBar({ demo, tickers = [] }: { demo: boolean; tickers?: string[] }) {
+export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: boolean; tickers?: string[]; flow?: Flow }) {
   const path = usePathname();
   const router = useRouter();
   const now = useNow();
@@ -87,6 +93,7 @@ export function TopBar({ demo, tickers = [] }: { demo: boolean; tickers?: string
     const run = w.match(/^RUN\s+(\S+)$/);
     if (run) { router.push(/^\d+$/.test(run[1]) ? `/shorting/runs/${run[1]}` : `/shorting/runs?d=${run[1]}`); return done(); }
     const c = COMMANDS.find((x) => x.word === w && x.href);
+    if (w === "CAL" && path === "/" && flashPanel("cal")) return done();
     if (c?.href) {
       const [p, hash] = c.href.split("#");
       if (hash && path === p) flashPanel(hash); else router.push(c.href);
@@ -149,7 +156,7 @@ export function TopBar({ demo, tickers = [] }: { demo: boolean; tickers?: string
   }
 
   const mkt = now ? marketState(now) : null;
-  const nr = now ? nextRun(now) : null;
+  const nr = now ? nextRun(now, flow) : null;
   const nrLeft = nr && now ? nr.at.getTime() - now.getTime() : null;
   const sameDay = nr && now ? nr.date === etParts(now).date : false;
   const active = (href: string) => (href === "/" ? path === "/" : href === "/shorting" ? path === "/shorting" : path.startsWith(href));

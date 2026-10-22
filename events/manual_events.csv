@@ -1,0 +1,9 @@
+event_date,event_time,kind,ticker,title,importance,url
+# Company events no free feed covers reliably: investor days, conference talks,
+# earnings-call times. One row per event; lines starting with # are ignored.
+# kind: EARNINGS_CALL | INVESTOR_DAY | CONFERENCE_TALK (any kind from 005 works)
+# event_time: HH:MM ET (24h), BMO, AMC, or blank. importance: 1 low, 2 medium, 3 high.
+# Examples (placeholders, not real events):
+# 2026-11-18,10:00,INVESTOR_DAY,XYZ,XYZ investor day,2,https://investors.example.com/events
+# 2026-12-02,13:30,CONFERENCE_TALK,XYZ,XYZ CFO at Example Tech Conference,1,https://investors.example.com/events
+# 2026-10-29,17:00,EARNINGS_CALL,XYZ,XYZ Q3 earnings call,2,

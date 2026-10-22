@@ -30,7 +30,7 @@ const cls = (v: unknown, kind: string) => (kind === "pct" && typeof v === "numbe
 const indexed = (eq: DatePt[]) => (eq.length ? eq.map((p) => ({ date: p.date, value: (100 * p.value) / eq[0].value })) : []);
 const ts = (d: string) => new Date(d + "T12:00:00Z").getTime();
 
-export function OptionsLab({ lab }: { lab: BtLab }) {
+export function OptionsLab({ lab, off = 0 }: { lab: BtLab; off?: number }) {
   const [sort, setSort] = useState<{ k: Key; dir: 1 | -1 }>({ k: "sharpe", dir: -1 });
   const [sel, setSel] = useState<string | null>(lab.strategies[0]?.id ?? null);
   useEffect(() => {
@@ -59,11 +59,11 @@ export function OptionsLab({ lab }: { lab: BtLab }) {
   const best = (k: Key) => { const vs = pool.map((s) => val(s, k)).filter((v): v is number => typeof v === "number"); return vs.length ? Math.max(...vs) : null; };
   const s = lab.strategies.find((x) => x.id === sel) ?? null;
 
-  if (!lab.strategies.length) return <Panel n={1} title="Backtest lab" code="BT" bt><Empty text="NO STRATEGIES IN THE BACKTEST FILE YET" /></Panel>;
+  if (!lab.strategies.length) return <Panel n={1 + off} title="Backtest lab" code="BT" bt><Empty text="NO STRATEGIES IN THE BACKTEST FILE YET" /></Panel>;
 
   return (
     <>
-      <Panel n={1} hot bt title="Strategy comparison" code="CMP" meta={`${pool.length} RUNS · CLICK A HEADER TO SORT · CLICK A ROW TO SELECT`}>
+      <Panel n={1 + off} hot bt title="Strategy comparison" code="CMP" meta={`${pool.length} RUNS · CLICK A HEADER TO SORT · CLICK A ROW TO SELECT`}>
         <div className="bt-filters" role="toolbar" aria-label="Filter backtests">
           <span className="muted">CAPITAL</span>
           {capitals.map((c) => (
@@ -110,20 +110,20 @@ export function OptionsLab({ lab }: { lab: BtLab }) {
       </Panel>
 
       <div className="grid2">
-        <Panel n={2} bt title="Risk vs return" code="RR" meta="X = |MAX DD| · Y = CAGR · SIZE = SHARPE">
+        <Panel n={2 + off} bt title="Risk vs return" code="RR" meta="X = |MAX DD| · Y = CAGR · SIZE = SHARPE">
           <RiskReturnScatter strategies={pool} selected={sel} onSelect={choose} benchmark={lab.benchmark} />
         </Panel>
-        <Panel n={3} bt title={s ? `Detail · ${s.name}` : "Detail"} code="DTL" meta={s ? `${s.underlying} · CAPITAL ${s.capital ? `$${s.capital.toLocaleString("en-US")}` : "—"}` : undefined}>
+        <Panel n={3 + off} bt title={s ? `Detail · ${s.name}` : "Detail"} code="DTL" meta={s ? `${s.underlying} · CAPITAL ${s.capital ? `$${s.capital.toLocaleString("en-US")}` : "—"}` : undefined}>
           {s ? <StrategyDetail s={s} bench={lab.benchmark?.equity ?? []} benchName={lab.benchmark?.name ?? "Benchmark"} /> : <Empty text="SELECT A STRATEGY" />}
         </Panel>
       </div>
 
-      <Panel n={4} bt title="Equity, indexed to 100" code="SM" meta="TOP 12 BY CURRENT SORT · SHARED Y-SCALE · GRAY = BENCHMARK">
+      <Panel n={4 + off} bt title="Equity, indexed to 100" code="SM" meta="TOP 12 BY CURRENT SORT · SHARED Y-SCALE · GRAY = BENCHMARK">
         <StrategySmallMultiples strategies={sorted.slice(0, 12)} benchmark={lab.benchmark?.equity ?? []} selected={sel} onSelect={choose} />
       </Panel>
 
       {s && (
-        <Panel n={5} bt title={`Monthly returns · ${s.name}`} code="MRET">
+        <Panel n={5 + off} bt title={`Monthly returns · ${s.name}`} code="MRET">
           <MonthlyReturnsHeatmap monthly={s.monthly} ariaLabel={`Monthly returns for ${s.name}`} />
         </Panel>
       )}

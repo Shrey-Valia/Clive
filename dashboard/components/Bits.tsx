@@ -1,8 +1,8 @@
 import Link from "next/link";
-import type { Alert, Bot, Run } from "@/lib/types";
+import type { Alert, Bot, BotAlert, Run } from "@/lib/types";
 import { botHealth, type Step, type Today } from "@/lib/analytics";
 import { GLOSSARY, FLAGS, flagInfo } from "@/lib/glossary";
-import { pct, usd } from "@/lib/format";
+import { etTime, pct, usd } from "@/lib/format";
 import { Countdown, Num } from "@/components/Live";
 
 /** One pill that answers "do I need to look at this bot?" — worse of the latest run row and the heartbeat. */
@@ -166,5 +166,32 @@ export function Stat({ label, term, children, sub, hero = false }: { label: stri
       <b>{children}</b>
       {sub && <span className="st-s">{sub}</span>}
     </div>
+  );
+}
+
+/** Direction chip, generic for a later long-side strategy: SHORT red, LONG green. `would` = dry run. */
+export function DirChip({ side, would = false }: { side: string; would?: boolean }) {
+  const s = side.toLowerCase().startsWith("l") || side.toLowerCase() === "buy" ? "long" : "short";
+  return <span className={`dir ${s}${would ? " would" : ""}`}>{would ? "WOULD " : ""}{s.toUpperCase()}</span>;
+}
+
+/** Open rows of the alerts table (004), newest first. */
+export function AlertsTable({ rows }: { rows: BotAlert[] }) {
+  if (!rows.length) return <Empty>NO OPEN ALERTS</Empty>;
+  return (
+    <div className="scroll"><table className="dense fit">
+      <thead><tr><th>Time ET</th><th>Bot</th><th>Level</th><th>Kind</th><th>Ticker</th><th>Message</th><th className="fill" /></tr></thead>
+      <tbody>{rows.map((a, i) => {
+        const bad = /^(err|crit|bad|high)/i.test(a.level);
+        return (
+          <tr key={String(a.id ?? i)} data-ticker={a.ticker ?? undefined} className={bad ? "failrow" : ""}>
+            <td>{etTime(a.at)}</td><td>{(a.bot_id ?? "—").toUpperCase()}</td>
+            <td><span className={`pill ${bad ? "bad" : "warn"}`}>{a.level.toUpperCase()}</span></td>
+            <td>{(a.kind ?? "—").replace(/_/g, " ").toUpperCase()}</td><td className="amber">{a.ticker ?? ""}</td>
+            <td className="wrapcell"><div>{a.message}</div></td><td className="fill" />
+          </tr>
+        );
+      })}</tbody>
+    </table></div>
   );
 }

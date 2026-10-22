@@ -4,7 +4,7 @@
 // Only lib/data.ts imports this, and only when isDemo is true.
 import demoScan from "@/lib/demo-scan.json";
 import type { Account, Bot, Candidate, Order, Position, Run, Snap, Trade } from "@/lib/types";
-import { etToDate, prevTradingDay } from "@/lib/time";
+import { etToDate, nextTradingDay, prevTradingDay } from "@/lib/time";
 import { WEIGHTS, COMP_ORDER } from "@/lib/glossary";
 
 /** mulberry32: small deterministic PRNG. */
@@ -131,9 +131,12 @@ for (let k = 0; k < N_DAYS; k++) {
 
 // ------------------------------------------------------------------ captured dry run
 const captured = demoScan.candidates as unknown as Candidate[];
-const CAPTURED_RUN: Run = { id: 1000 + N_DAYS - 1, run_date: CAPTURED_DATE, mode: "dry_run", status: "dry_run_done",
+// The captured scan is tagged as the new intraday_v2 flow (picks saved at 15:45, entry at the next 09:31 open)
+// so the v2 banner and timeline have a row to render; the simulated history stays overnight_v1.
+const CAPTURED_RUN: Run = { id: 1000 + N_DAYS - 1, run_date: CAPTURED_DATE, mode: "dry_run", status: "picks_saved",
   started_at: "2026-10-20T19:45:00Z", equity: demoScan.equity, n_candidates: captured.length,
-  n_selected: captured.filter((c) => c.selected).length, n_orders: 0, message: null };
+  n_selected: captured.filter((c) => c.selected).length, n_orders: 0, message: null,
+  strategy_version: "intraday_v2", trade_date: nextTradingDay(CAPTURED_DATE), scan_at: "2026-10-20T19:45:00Z", code_version: "demo" };
 candByRun.set(CAPTURED_RUN.id, captured.map((c) => ({ ...c, run_id: CAPTURED_RUN.id })));
 runs.push(CAPTURED_RUN);
 runs.reverse(); // newest first, like the real query
@@ -146,8 +149,8 @@ export const DEMO_BOTS: Bot[] = [
     run_state: "ok", last_message: "2026-10-20: dry run, 5 picks", last_heartbeat: "2026-10-20T20:15:12Z" },
   { id: "lucid", name: "Lucid Bot", kind: "lucid", status: "inactive",
     description: "Pine Script alerts → CrossTrade webhook → Tradovate funded accounts.", run_state: null, last_message: null, last_heartbeat: null },
-  { id: "options", name: "Options Bot", kind: "options", status: "planned", description: "Options strategies, in backtest.",
-    run_state: null, last_message: null, last_heartbeat: null },
+  { id: "options", name: "Options Bot", kind: "options", status: "active", description: "Dip put credit spreads on SPY/QQQ/IWM, Alpaca paper (separate account), 15:50 ET.",
+    run_state: "ok", last_message: "synced (simulated)", last_heartbeat: new Date(Date.now() - 10 * 3600_000).toISOString() },
 ];
 
 export const demo = {

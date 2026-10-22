@@ -68,8 +68,8 @@ export function ChromeGate({ children }: { children: React.ReactNode }) {
 }
 
 /** Sticky bottom status bar with live fields. */
-export function StatusBar({ demo, email, positions, gross, lastSync }: {
-  demo: boolean; email: string | null; positions: number | null; gross: number | null; lastSync: string | null;
+export function StatusBar({ demo, email, positions, gross, lastSync, flow = "overnight_v1" }: {
+  demo: boolean; email: string | null; positions: number | null; gross: number | null; lastSync: string | null; flow?: string;
 }) {
   const now = useNow(1000);
   const path = usePathname();
@@ -83,7 +83,7 @@ export function StatusBar({ demo, email, positions, gross, lastSync }: {
       <span className="sb-brand">CLIVE TERMINAL</span>
       {!login && (
         <>
-          <span>ROTATION <b className={cls}>T−{left === null ? "--:--:--" : countdown(left, true)}</b></span>
+          <span>{flow === "intraday_v2" ? "COVER" : "ROTATION"} <b className={cls}>T−{left === null ? "--:--:--" : countdown(left, true)}</b></span>
           <span>SYNC <b className="val">{syncAge === null ? "—" : syncAge < 60 ? `${syncAge}M AGO` : syncAge < 2880 ? `${Math.round(syncAge / 60)}H AGO` : `${Math.round(syncAge / 1440)}D AGO`}</b></span>
           <span>POS <b className="val">{positions ?? "—"}</b></span>
           <span>GROSS <b className="val">{gross === null ? "—" : `${gross.toFixed(0)}%`}</b></span>

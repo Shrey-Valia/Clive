@@ -3,7 +3,7 @@ import { Abbr, Empty, ModePill, NoAccess, PageHead, Panel, Sgn, Stat } from "@/c
 import { ScanBoard } from "@/components/ScanBoard";
 import { ScanFunnel, ScoreBoard, ScoreLegend } from "@/components/Viz";
 import { getRun } from "@/lib/data";
-import { funnel } from "@/lib/analytics";
+import { funnel, runFlow, runStatusLabel, runTone, runTrades, tradeDate } from "@/lib/analytics";
 import { RUN_LABEL } from "@/lib/glossary";
 import { dayLabel, etDateOf, etHm, etTime, pct, usd, ymd } from "@/lib/format";
 
@@ -17,7 +17,8 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
   if (!r.run) notFound();
   const { run, candidates, orders, simulated: sim } = r;
   const live = run.mode === "execute";
-  const trades = r.trades.filter((t) => etDateOf(t.entry_at) === run.run_date);
+  const v2 = runFlow(run) === "intraday_v2";
+  const { trades, by: joinedBy } = runTrades(run, r.trades);
   const close = new Map(candidates.map((c) => [c.ticker, c.close]));
   const filled = orders.filter((o) => o.status === "filled").length;
   const rejected = orders.filter((o) => ["rejected", "canceled", "expired"].includes(o.status)).length;
@@ -30,8 +31,8 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
 
   return (
     <>
-      <PageHead fn="RUN" title={`Run ${dayLabel(run.run_date)} · #${run.id}`} desc={`Scanned ${etTime(run.started_at)} ET · ${run.n_candidates ?? 0} names · ${run.n_selected ?? 0} picked`}
-        right={<><ModePill run={run} big /><span className={`pill ${run.status === "failed" ? "bad" : run.status === "executed_with_errors" ? "warn" : run.status === "executed" ? "ok" : "off"}`}>{RUN_LABEL[run.status] ?? run.status.toUpperCase()}</span></>}
+      <PageHead fn="RUN" title={`Run ${dayLabel(run.run_date)} · #${run.id}`} desc={`Scanned ${etTime(run.scan_at ?? run.started_at)} ET · ${run.n_candidates ?? 0} names · ${run.n_selected ?? 0} picked${v2 ? ` · trades ${dayLabel(tradeDate(run))}: short 09:31${run.entry_at ? ` (${etHm(run.entry_at)})` : ""} → cover 15:55${run.exit_at ? ` (${etHm(run.exit_at)})` : ""}` : ""}${run.strategy_version ? ` · ${run.strategy_version}` : ""}${run.code_version ? ` · ${run.code_version.slice(0, 8)}` : ""}`}
+        right={<><ModePill run={run} big /><span className={`pill ${runTone(run.status)}`}>{runStatusLabel(run.status)}</span></>}
         keys={keys} />
 
       {run.status === "failed" && (
@@ -45,7 +46,7 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
         <Stat label="SCANNED" sub={`${run.n_selected ?? 0} PICKED`}>{run.n_candidates ?? "—"}</Stat>
         <Stat label="ORDERS" sub={`${filled} FILLED`}>{orders.length || run.n_orders || 0}</Stat>
         <Stat label="REJECTED"><span className={rejected ? "neg" : "zero"}>{rejected}</span></Stat>
-        <Stat label="NEXT-DAY P&L" term="ROTATION" sub={trades.length ? `${trades.length} TRADES CLOSED` : live ? "NOT CLOSED YET" : "DRY RUN · NO TRADES"}><Sgn v={trades.length ? nextPnl : null} /></Stat>
+        <Stat label={v2 ? "BOOK P&L" : "NEXT-DAY P&L"} term="ROTATION" sub={trades.length ? `${trades.length} TRADES CLOSED · BY ${joinedBy === "run_id" ? "RUN_ID" : "DATE"}` : live ? "NOT CLOSED YET" : "DRY RUN · NO TRADES"}><Sgn v={trades.length ? nextPnl : null} /></Stat>
       </div>
 
       {candidates.length > 0 ? (
@@ -84,7 +85,7 @@ export default async function RunDetail({ params }: { params: Promise<{ id: stri
         )}
       </Panel>
 
-      <Panel n={5} title="Next-day result" code="RSLT" sim={sim} meta="TRADES ENTERED ON THIS RUN'S DATE, CLOSED AT THE NEXT ROTATION">
+      <Panel n={5} title={v2 ? "Book result" : "Next-day result"} code="RSLT" sim={sim} meta={joinedBy === "run_id" ? "TRADES WITH THIS RUN_ID" : v2 ? "TRADES ENTERED AT THE NEXT SESSION'S OPEN, COVERED 15:55" : "TRADES ENTERED ON THIS RUN'S DATE, CLOSED AT THE NEXT ROTATION"}>
         {trades.length === 0 ? <Empty>{live ? "THIS BOOK HASN'T CLOSED YET" : "DRY RUN · NOTHING TRADED"}</Empty> : (
           <div className="scroll"><table className="dense fit">
             <thead><tr><th>Ticker</th><th className="num">Qty</th><th className="num">Entry</th><th className="num">Exit</th><th>Exit ET</th><th className="num">P&amp;L</th><th className="num">%</th><th className="fill" /></tr></thead>

@@ -5,9 +5,11 @@
 
   - account equity snapshot (one row per day)
   - current positions (replaced wholesale)
-  - round-trip trades rebuilt from every fill since config.TRACK_FROM
-  - fill status for today's orders
-  - heartbeat
+  - round-trip trades rebuilt from every fill since config.TRACK_FROM, each tagged with
+    the run_id of the order that opened it (from short_orders)
+  - one sync_runs row
+  - heartbeat: writes bots.last_sync_status / last_sync_at only. run_state becomes the worse
+    of the run and the sync, so a clean sync no longer hides a failed run.
 """
 from __future__ import annotations
 
@@ -18,13 +20,13 @@ from collections import defaultdict, deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from shortingbot import broker, config, db  # noqa: E402
+from shortingbot import broker, config, db, risk  # noqa: E402
 from daily import log, setup_logging  # noqa: E402
 
 
 def round_trips(fills: list[dict]) -> list[dict]:
     """FIFO-pair fills per symbol into closed trades. Works for longs and shorts."""
-    lots: dict[str, deque] = defaultdict(deque)   # symbol -> deque of [signed_qty, price, time]
+    lots: dict[str, deque] = defaultdict(deque)   # symbol -> deque of [signed_qty, price, time, order_id]
     trades = []
     for f in fills:
         sym, px, ts = f["symbol"], float(f["price"]), f["transaction_time"]
@@ -39,22 +41,41 @@ def round_trips(fills: list[dict]) -> list[dict]:
                 "id": f"{sym}-{lot[2]}-{ts}-{matched:g}", "ticker": sym, "side": side, "qty": matched,
                 "entry_at": lot[2], "entry_price": lot[1], "exit_at": ts, "exit_price": px,
                 "pnl": round(pnl, 2), "pnl_pct": round(100 * pnl / (lot[1] * matched), 2),
+                "entry_order_id": lot[3],
             })
             lot[0] += matched if lot[0] < 0 else -matched
             qty += matched if qty < 0 else -matched
             if lot[0] == 0:
                 book.popleft()
         if qty:
-            book.append([qty, px, ts])
+            book.append([qty, px, ts, f.get("order_id")])
     return trades
+
+
+def tag_run_ids(trades: list[dict]) -> list[dict]:
+    """Replace each trade's entry_order_id with the run_id short_orders has for that order."""
+    ids = sorted({t["entry_order_id"] for t in trades if t.get("entry_order_id")})
+    run_of = {}
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        for row in db.select("short_orders", {"select": "id,run_id", "id": f"in.({','.join(chunk)})"}):
+            run_of[row["id"]] = row.get("run_id")
+    out = []
+    for t in trades:
+        t = dict(t)
+        t["run_id"] = run_of.get(t.pop("entry_order_id", None))
+        out.append(t)
+    return out
 
 
 def main() -> int:
     setup_logging()
     broker.load_env()
     today = dt.datetime.now(broker.ET).date().isoformat()
+    acct, pos, trades = None, [], []
     try:
         acct = broker.account()
+        risk.update_peak(acct["equity"])                 # for the optional DRAWDOWN_HALT_PCT
         db.insert("equity_snapshots", {
             "bot_id": db.BOT_ID, "snap_date": today, "equity": acct["equity"], "cash": acct["cash"],
             "day_pl": round(acct["equity"] - acct["last_equity"], 2),
@@ -68,16 +89,23 @@ def main() -> int:
                                 for p in pos])
 
         fills = broker.fills(config.TRACK_FROM)
-        trades = round_trips(fills)
+        trades = tag_run_ids(round_trips(fills))
         db.insert("short_trades", trades, upsert_on="id")
 
-        log.info("sync: equity $%.2f, %d positions, %d fills -> %d closed trades",
-                 acct["equity"], len(pos), len(fills), len(trades))
-        db.heartbeat("ok", f"{today}: synced, equity ${acct['equity']:,.2f}, {len(pos)} positions")
+        msg = f"{today}: synced, equity ${acct['equity']:,.2f}, {len(pos)} positions"
+        log.info("sync: equity $%.2f, %d positions, %d fills -> %d closed trades (%d with a run_id)",
+                 acct["equity"], len(pos), len(fills), len(trades), sum(1 for t in trades if t.get("run_id")))
+        db.insert("sync_runs", {"bot_id": db.BOT_ID, "at": dt.datetime.now(dt.timezone.utc), "status": "ok",
+                                "equity": acct["equity"], "n_positions": len(pos), "n_trades": len(trades),
+                                "message": msg})
+        db.heartbeat("ok", msg, source="sync")
         return 0
     except Exception as e:
         log.error("sync failed: %s", e)
-        db.heartbeat("error", f"{today}: sync failed: {e}")
+        db.insert("sync_runs", {"bot_id": db.BOT_ID, "at": dt.datetime.now(dt.timezone.utc), "status": "error",
+                                "equity": acct["equity"] if acct else None, "n_positions": len(pos),
+                                "n_trades": len(trades), "message": f"sync failed: {e}"[:500]})
+        db.heartbeat("error", f"{today}: sync failed: {e}", source="sync")
         return 1
 
 
