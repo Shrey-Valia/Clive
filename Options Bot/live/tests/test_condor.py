@@ -140,7 +140,10 @@ def _plan(jobs):
 
 
 def test_flag_off_dip_order_plan_is_identical_to_the_pre_condor_code(monkeypatch, isolated):
-    assert C.CONDOR_ENABLED is False                                   # shipped default
+    # The golden plan was recorded with the condor off and QQQ in the universe; pin both
+    # so this keeps proving "flag off = pre-condor behaviour" whatever the shipped config is.
+    monkeypatch.setattr(C, "CONDOR_ENABLED", False)
+    monkeypatch.setattr(C, "UNIVERSE", ["SPY", "QQQ", "IWM"])
     fake = _dip_scenario(monkeypatch, with_condor_chain=True)          # condor-eligible chain is there, flag is off
     seen = capture(monkeypatch)
     assert R.main(["--execute", "--now"]) == 0
