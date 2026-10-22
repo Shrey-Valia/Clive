@@ -31,6 +31,8 @@ CACHE_DIR = LIVE_DIR / ".cache"
 
 BOT_ID = "options"
 ORDER_PREFIX = BOT_ID + "-"     # every client_order_id the bot sends starts with this; only these are canceled
+SLEEVE_DIP = "dip"              # spread orders: "options-dip-..." (dip put credit spread)
+SLEEVE_CONDOR = "condor"        # ...            "options-condor-..." (SPY iron condor)
 STRATEGY_ID = "dip_pcs_live"
 MARKET_TZ = "America/New_York"
 
@@ -84,9 +86,34 @@ MAX_COMBO_SPREAD_FRAC = 0.40    # ... or up to this share of the mid credit
 DELTA_TOLERANCE = 0.08          # chosen leg's |delta| must be within this of the target
 MIN_WIDTH = 1.0                 # $; narrower spreads are rejected
 
+# ---------------------------------------------------------------- condor sleeve (second, independent)
+# Spreads finalist F1 (tuning/spreads/REPORT.md, frozen.json `F1_ic10_w3_60d_hold`): SPY iron
+# condor, 0.10 delta shorts on both sides, wings 3% of spot, 50-70 DTE (target 60), held to
+# expiry (no take-profit, no stop), max loss <= 20% of equity, one position at a time, skip when
+# the credit > 60% of the width. OFF by default. `run.py --condor` forces it on for one run.
+# Live differences: it is closed on the last trading day before expiry at the daily decision
+# time (the dip sleeve's expiry_exit), the 09:45 sweep closes anything left on expiry day, and no
+# condor order is ever sent on expiry day at or after CONDOR_EXPIRY_DAY_DEADLINE (Alpaca starts its
+# own expiration handling at 15:30 ET). New entries need the kill switch to be clear.
+CONDOR_ENABLED = False
+CONDOR_UNDERLYING = "SPY"
+CONDOR_SHORT_DELTA = 0.10       # |delta| of the short put and the short call
+CONDOR_WING_PCT = 0.03          # long strikes at short -/+ 3% of spot
+CONDOR_DTE_MIN, CONDOR_DTE_MAX, CONDOR_DTE_TARGET = 50, 70, 60
+CONDOR_DELTA_TOLERANCE = 0.05   # chosen short leg's |delta| must be within this of 0.10
+CONDOR_RISK_PER_POSITION = 0.20 # condor max loss <= 20% of equity
+CONDOR_MAX_POSITIONS = 1        # one condor at a time
+CONDOR_MAX_CREDIT_FRAC = 0.60   # bug #7 guard on the condor's (max) width
+CONDOR_MIN_CREDIT_ABS = 0.10    # research: an iron condor needs > $0.10 credit
+CONDOR_CLOSE_DTE_TRADING_DAYS = 1   # close at the daily run on the last trading day before expiry
+CONDOR_EXPIRY_DAY_DEADLINE = "15:00"    # ET: no condor orders on expiry day at or after this
+CONDOR_EXPIRY_DAY_MARGIN_MINUTES = 6    # ... and none started later than this before the deadline
+
 # ---------------------------------------------------------------- sizing
 RISK_PER_POSITION = 0.25        # max loss per spread position <= 25% of equity
-RISK_TOTAL = 0.50               # total max loss across positions <= 50% of equity
+# Total max loss across positions <= 50% of equity. This is the SHARED budget of both sleeves:
+# open dip spreads + the open condor (its max loss is reserved) + anything planned this run.
+RISK_TOTAL = 0.50
 MAX_CONTRACTS = 50              # hard per-order cap, whatever the equity
 DRY_RUN_EQUITY = 10_000.0       # used when no options account exists yet (dry run only)
 

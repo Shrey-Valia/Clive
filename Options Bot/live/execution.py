@@ -61,6 +61,7 @@ class Job:
     credit: bool                      # True: prices are credits received
     cutoff_price: float | None = None # exits: aggressive price used at the cutoff
     meta: dict = field(default_factory=dict)
+    sleeve: str = C.SLEEVE_DIP        # "dip" | "condor": client_order_id "options-<sleeve>-..."
     # ---- runtime
     order_id: str | None = None       # the order currently working (None when settled)
     step: int = 0
@@ -163,7 +164,7 @@ def _submit(broker, job: Job, price: float, clock: Clock) -> None:
     n = job.remaining
     if n <= 0:
         return
-    cid = client_order_id(job.purpose, job.key, len(job.cids))
+    cid = client_order_id(job.sleeve, job.purpose, job.key, len(job.cids))
     job.cids.append(cid)
     try:
         o = broker.submit_mleg(job.legs, n, job.signed(price), cid)
@@ -478,3 +479,19 @@ def open_legs(short_symbol: str, long_symbol: str) -> list[dict]:
 def close_legs(short_symbol: str, long_symbol: str) -> list[dict]:
     return [{"symbol": short_symbol, "side": "buy", "position_intent": "buy_to_close", "ratio_qty": 1},
             {"symbol": long_symbol, "side": "sell", "position_intent": "sell_to_close", "ratio_qty": 1}]
+
+
+def condor_open_legs(put_short: str, put_long: str, call_short: str, call_long: str) -> list[dict]:
+    """Four legs, ratio 1 each (Alpaca mleg allows up to 4). Net credit -> negative limit."""
+    return [{"symbol": put_short, "side": "sell", "position_intent": "sell_to_open", "ratio_qty": 1},
+            {"symbol": put_long, "side": "buy", "position_intent": "buy_to_open", "ratio_qty": 1},
+            {"symbol": call_short, "side": "sell", "position_intent": "sell_to_open", "ratio_qty": 1},
+            {"symbol": call_long, "side": "buy", "position_intent": "buy_to_open", "ratio_qty": 1}]
+
+
+def condor_close_legs(put_short: str, put_long: str, call_short: str, call_long: str) -> list[dict]:
+    """Net debit -> positive limit."""
+    return [{"symbol": put_short, "side": "buy", "position_intent": "buy_to_close", "ratio_qty": 1},
+            {"symbol": put_long, "side": "sell", "position_intent": "sell_to_close", "ratio_qty": 1},
+            {"symbol": call_short, "side": "buy", "position_intent": "buy_to_close", "ratio_qty": 1},
+            {"symbol": call_long, "side": "sell", "position_intent": "sell_to_close", "ratio_qty": 1}]

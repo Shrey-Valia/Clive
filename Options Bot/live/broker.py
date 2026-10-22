@@ -261,6 +261,15 @@ class Broker:
         raise last
 
     def submit_mleg(self, legs: list[dict], qty: int, limit_price: float, client_order_id: str) -> dict:
+        if len(legs) > 4:                           # Alpaca mleg: at most 4 legs (a condor is exactly 4)
+            raise SafetyError(f"mleg order allows at most 4 legs, got {len(legs)}")
+        if len({l["symbol"] for l in legs}) != len(legs):
+            raise SafetyError("mleg order repeats a leg symbol")
+        bad = [l for l in legs if int(l.get("ratio_qty", 1)) != 1 or l.get("side") not in ("buy", "sell")
+               or l.get("position_intent") not in ("buy_to_open", "sell_to_open", "buy_to_close", "sell_to_close")
+               or not str(l.get("position_intent")).startswith(l.get("side", "?"))]
+        if bad:
+            raise SafetyError(f"mleg leg has an invalid side / position_intent / ratio_qty: {bad[0]}")
         body = {"order_class": "mleg", "qty": str(int(qty)), "type": "limit",
                 "limit_price": f"{limit_price:.2f}", "time_in_force": "day",
                 "client_order_id": client_order_id[:128],

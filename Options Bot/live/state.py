@@ -14,6 +14,7 @@ from pathlib import Path
 from . import config as C
 
 POSITIONS = "positions.json"
+CONDORS = "condors.json"        # condor sleeve records (sleeve "condor"), kept apart from the dip spreads
 TRADES = "trades.jsonl"
 ORDERS = "orders.jsonl"
 GUARD = "last_execute.json"
@@ -38,6 +39,15 @@ def load_positions(d: Path | None = None) -> dict:
 
 def save_positions(pos: dict, d: Path | None = None) -> None:
     _atomic(_dir(d) / POSITIONS, json.dumps(pos, indent=1, default=str, sort_keys=True))
+
+
+def load_condors(d: Path | None = None) -> dict:
+    f = _dir(d) / CONDORS
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def save_condors(pos: dict, d: Path | None = None) -> None:
+    _atomic(_dir(d) / CONDORS, json.dumps(pos, indent=1, default=str, sort_keys=True))
 
 
 def append(name: str, rec: dict, d: Path | None = None) -> None:
@@ -85,5 +95,26 @@ def reconcile(spreads, records: dict, today: dt.date) -> tuple[dict, list[str], 
         else:
             r = {**r, "qty": s.qty}
         out[s.id] = r
+    vanished = [{"id": k, **v} for k, v in records.items() if k not in out]
+    return out, adopted, vanished
+
+
+def reconcile_condors(condors, records: dict, today: dt.date) -> tuple[dict, list[str], list[dict]]:
+    """``reconcile`` for the condor sleeve: (records for every broker condor,
+    ids adopted without a record, records no longer at the broker)."""
+    out, adopted = {}, []
+    for c in condors:
+        r = records.get(c.id)
+        if r is None:
+            r = {"sleeve": C.SLEEVE_CONDOR, "underlying": c.underlying, "expiry": c.expiry.isoformat(),
+                 "put_short_symbol": c.put_short_symbol, "put_long_symbol": c.put_long_symbol,
+                 "call_short_symbol": c.call_short_symbol, "call_long_symbol": c.call_long_symbol,
+                 "put_short_strike": c.put_short_strike, "put_long_strike": c.put_long_strike,
+                 "call_short_strike": c.call_short_strike, "call_long_strike": c.call_long_strike,
+                 "qty": c.qty, "entry_date": today.isoformat(), "entry_credit": c.broker_credit, "adopted": True}
+            adopted.append(c.id)
+        else:
+            r = {**r, "qty": c.qty}
+        out[c.id] = r
     vanished = [{"id": k, **v} for k, v in records.items() if k not in out]
     return out, adopted, vanished

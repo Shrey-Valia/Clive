@@ -21,7 +21,7 @@ from live import config as C  # noqa: E402
 from live import db, state  # noqa: E402
 from live import strategy as S  # noqa: E402
 from live.broker import ET, Broker  # noqa: E402
-from live.run import TRADE_COLS, log, setup_logging  # noqa: E402
+from live.run import CONDOR_TRADE_COLS, TRADE_COLS, log, setup_logging  # noqa: E402
 
 
 def spread_rows(broker: Broker, records: dict, now: dt.datetime) -> list[dict]:
@@ -39,6 +39,27 @@ def spread_rows(broker: Broker, records: dict, now: dt.datetime) -> list[dict]:
                      "entry_date": r["entry_date"], "entry_credit": credit, "mark_debit": mark,
                      "unrealized_pl": round((credit - mark) * 100 * qty, 2) if mark is not None else None,
                      "max_loss": S.max_loss(width, credit, qty), "updated_at": now})
+    return rows
+
+
+def condor_rows(broker: Broker, condors: dict, now: dt.datetime) -> list[dict]:
+    """options_live_positions rows for the condor sleeve: the put legs in the
+    short/long columns, the call legs and the sleeve in migration 006's columns."""
+    syms = sorted({s for r in condors.values() for s in S.condor_leg_symbols(r)})
+    quotes = broker.option_quotes(syms) if syms else {}
+    rows = []
+    for cid, r in condors.items():
+        mark = S.condor_exit_prices(*[quotes.get(x) for x in S.condor_leg_symbols(r)])[0]
+        credit, qty = float(r["entry_credit"]), int(r["qty"])
+        rows.append({"bot_id": C.BOT_ID, "spread_id": cid, "underlying": r["underlying"], "expiry": r["expiry"],
+                     "short_symbol": r["put_short_symbol"], "long_symbol": r["put_long_symbol"],
+                     "short_strike": r["put_short_strike"], "long_strike": r["put_long_strike"], "qty": qty,
+                     "entry_date": r["entry_date"], "entry_credit": credit, "mark_debit": mark,
+                     "unrealized_pl": round((credit - mark) * 100 * qty, 2) if mark is not None else None,
+                     "max_loss": S.max_loss(S.condor_width(r), credit, qty), "updated_at": now,
+                     "sleeve": C.SLEEVE_CONDOR, "call_short_symbol": r["call_short_symbol"],
+                     "call_long_symbol": r["call_long_symbol"], "call_short_strike": r["call_short_strike"],
+                     "call_long_strike": r["call_long_strike"]})
     return rows
 
 
@@ -63,17 +84,30 @@ def main() -> int:
                                  "avg_entry_price": p["avg_entry_price"], "current_price": p["current_price"],
                                  "market_value": p["market_value"], "unrealized_pl": p["unrealized_pl"],
                                  "unrealized_plpc": p["unrealized_plpc"], "updated_at": now} for p in pos])
-        spreads, orphans = S.group_spreads(pos)
-        records, _, _ = state.reconcile(spreads, state.load_positions(), today)
+        stored = state.load_positions()
+        stored_condors = state.load_condors()
+        spreads, condors, orphans = S.group_book(pos, stored_condors, stored)     # condor legs never pair as dips
+        records, _, _ = state.reconcile(spreads, stored, today)
         rows = spread_rows(broker, records, now)
         db.delete("options_live_positions", {"bot_id": C.BOT_ID})
         db.insert("options_live_positions", rows)
-        trades = [{k: t.get(k) for k in TRADE_COLS} for t in state.read_jsonl(state.TRADES)
-                  if t.get("pnl") is not None and t.get("id")]          # external closes with a known P&L too
+        crows = []
+        if condors or stored_condors:
+            crecords, _, _ = state.reconcile_condors(condors, stored_condors, today)
+            crows = condor_rows(broker, crecords, now)
+            db.insert("options_live_positions", crows)      # separate insert: extra columns (migration 006)
+        journal = [t for t in state.read_jsonl(state.TRADES) if t.get("pnl") is not None and t.get("id")]
+        trades = [{k: t.get(k) for k in TRADE_COLS} for t in journal               # external closes with a known P&L too
+                  if t.get("sleeve") != C.SLEEVE_CONDOR]
         db.insert("options_live_trades", trades, upsert_on="id")
+        ctrades = [{k: t.get(k) for k in TRADE_COLS + CONDOR_TRADE_COLS} for t in journal
+                   if t.get("sleeve") == C.SLEEVE_CONDOR]
+        if ctrades:
+            db.insert("options_live_trades", ctrades, upsert_on="id")
         msg = (f"{today}: synced, equity ${acct['equity']:,.2f}, {len(rows)} spreads"
+               + (f", {len(crows)} condors" if crows else "")
                + (f", {len(orphans)} UNPAIRED legs" if orphans else ""))
-        log.info("sync: %s; %d trades in journal", msg, len(trades))
+        log.info("sync: %s; %d trades in journal", msg, len(trades) + len(ctrades))
         db.heartbeat("warning" if orphans else "ok", msg)
         return 0
     except Exception as e:

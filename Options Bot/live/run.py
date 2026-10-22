@@ -9,6 +9,10 @@
     python3 live/run.py --check            health check (keys, paper account, data, VIX, Supabase)
     python3 live/run.py --close-all        emergency: show how every spread would be closed
     python3 live/run.py --close-all --execute  ... and close them now (aggressive prices)
+    python3 live/run.py --now --preview --condor   dry run with the SPY iron condor sleeve forced on
+
+Two sleeves: the dip put credit spread (always on) and the SPY iron condor
+(config.CONDOR_ENABLED, off by default; --condor forces it on for one run).
 
 Only --execute sends orders, and only to the dedicated options PAPER account
 (OPT_APCA_* in "Options Bot/.env"). See live/README.md.
@@ -217,11 +221,15 @@ def open_max_loss(records: dict) -> float:
 
 
 def plan_entries(ctx: Ctx, records: dict, acct: dict, kill: tuple[bool, str], symbols: list[str],
-                 preview: bool = False):
+                 preview: bool = False, reserved: float = 0.0, avoid: set | None = None):
     """Entry jobs for symbols with a signal. ``preview`` also prices the spread
-    for symbols without one (display only; never produces a job)."""
+    for symbols without one (display only; never produces a job).
+    ``reserved``: max loss the condor sleeve holds (open or planned this run) in
+    the shared RISK_TOTAL budget. ``avoid``: option symbols the condor sleeve
+    holds or is opening; a dip spread never trades one of them (Alpaca nets
+    positions per symbol, so the two sleeves would merge)."""
     jobs, rows = [], []
-    used = open_max_loss(records)
+    used = open_max_loss(records) + reserved
     bp = acct.get("options_buying_power")
     held = {r["underlying"] for r in records.values()}
     for sym in symbols:
@@ -260,6 +268,8 @@ def plan_entries(ctx: Ctx, records: dict, acct: dict, kill: tuple[bool, str], sy
             continue
         bad = S.check_pick(pick, now=ctx.now() if ctx.strict else None)
         ladder = S.entry_ladder(pick)
+        if avoid and {pick.short.symbol, pick.long.symbol} & avoid:
+            bad = bad or "a leg is held or traded by the condor sleeve"
         if blocked:
             n, why = S.size_position(acct["equity"], pick.width, ladder[-1], used, bp)
             row["action"] = f"{blocked} | preview: {'guard: ' + bad if bad else f'would size {n}x ({why})'}"
@@ -282,6 +292,207 @@ def plan_entries(ctx: Ctx, records: dict, acct: dict, kill: tuple[bool, str], sy
                                   meta={"pick": pick, "signal": {k: getattr(sig, k) for k in
                                                                  ("close", "sma200", "sma5", "rsi2", "ibs")}}))
     return jobs, rows
+
+
+# ---------------------------------------------------------------- condor sleeve
+def condor_enabled(args) -> bool:
+    """config.CONDOR_ENABLED, or --condor for this run."""
+    return bool(C.CONDOR_ENABLED or getattr(args, "condor", False))
+
+
+def condor_open_max_loss(condors: dict) -> float:
+    return sum(S.max_loss(S.condor_width(r), float(r["entry_credit"]), int(r["qty"])) for r in condors.values())
+
+
+def condor_symbols(condors: dict) -> set[str]:
+    return {s for r in condors.values() for s in S.condor_leg_symbols(r)}
+
+
+def dip_symbols(records: dict) -> set[str]:
+    return {r[k] for r in records.values() for k in ("short_symbol", "long_symbol") if r.get(k)}
+
+
+def condor_deadline(today: dt.date, close_at: dt.datetime | None = None) -> dt.datetime:
+    """Latest time a condor order may work on its expiry day: CONDOR_EXPIRY_DAY_DEADLINE
+    (15:00 ET), or one hour before an early close."""
+    d = dt.datetime.combine(today, dt.time.fromisoformat(C.CONDOR_EXPIRY_DAY_DEADLINE), ET)
+    if close_at is not None:
+        d = min(d, close_at - dt.timedelta(hours=1))
+    return d
+
+
+def plan_condor_exits(ctx: Ctx, condors: dict, sessions: list[dt.date], mode: str = "daily",
+                      force_all: bool = False, deadline: dt.datetime | None = None):
+    """(jobs, rows) for open condors that should close now (S.condor_exit_reason:
+    held to expiry, closed on the last trading day before it). On expiry day no
+    job is made at or after ``deadline`` minus CONDOR_EXPIRY_DAY_MARGIN_MINUTES:
+    the row is flagged ``blocked`` and the run raises an error to close by hand,
+    so a condor order never works into Alpaca's 15:30 expiration handling.
+    Without usable quotes the exit is priced from intrinsic value, as for dips."""
+    jobs, rows = [], []
+    if not condors:
+        return jobs, rows
+    deadline = deadline or condor_deadline(ctx.today)
+    syms = sorted(condor_symbols(condors))
+    try:
+        quotes = ctx.broker.option_quotes(syms)
+    except Exception as e:                      # noqa: BLE001
+        ctx.warn(f"option quotes unavailable for condor exits: {e}")
+        quotes = {}
+    for cid, r in sorted(condors.items()):
+        legs = [quotes.get(x) for x in S.condor_leg_symbols(r)]
+        mid, natural, qnote = S.condor_exit_prices(*legs)
+        exp = dt.date.fromisoformat(r["expiry"])
+        held = S.held_trading_days(dt.date.fromisoformat(r["entry_date"]), ctx.today, sessions)
+        tdte = S.trading_days_until(exp, ctx.today, sessions)
+        reason = S.condor_exit_reason(expiry=exp, today=ctx.today, trading_days_to_expiry=tdte, mode=mode,
+                                      force_all=force_all)
+        try:
+            spot = ctx.signal(r["underlying"]).close
+        except Exception:                       # noqa: BLE001
+            spot = math.nan
+        row = {"id": cid, "qty": r["qty"], "entry_credit": r["entry_credit"], "entry_mid": r.get("entry_mid"),
+               "mid_debit": mid, "natural_debit": natural, "held": held, "tdte": tdte, "spot": spot,
+               "reason": reason, "note": qnote, "expiry": exp, "blocked": False,
+               "max_loss": S.max_loss(S.condor_width(r), float(r["entry_credit"]), int(r["qty"]))}
+        rows.append(row)
+        if not reason:
+            continue
+        if (exp <= ctx.today and not force_all
+                and ctx.now() >= deadline - dt.timedelta(minutes=C.CONDOR_EXPIRY_DAY_MARGIN_MINUTES)):
+            row["blocked"] = True
+            row["reason"] = f"{reason} (BLOCKED: past the {deadline:%H:%M} ET condor deadline)"
+            ctx.warn(f"CONDOR {cid} EXPIRES TODAY AND IS STILL OPEN after {deadline:%H:%M} ET; no order sent so "
+                     f"nothing works into Alpaca's 15:30 expiration handling. Close it by hand now.")
+            continue
+        width = S.condor_width(r)
+        if mid is None:
+            ladder, cut = S.condor_blind_exit_prices(r, spot if math.isfinite(spot) else None)
+            ctx.warn(f"{cid}: {reason} with no usable quotes; pricing from intrinsic value {ladder} / cutoff {cut}")
+            mid, natural = ladder[0], ladder[-1]
+        else:
+            ladder = S.exit_ladder(mid, natural, steps=2) if force_all else S.exit_ladder(mid, natural)
+            cut = S.exit_cutoff_price(natural, width)
+        if qnote:
+            ctx.warn(f"{cid}: {reason} with {qnote}")
+        jobs.append(execution.Job(cid, "close", execution.condor_close_legs(*S.condor_leg_symbols(r)),
+                                  int(r["qty"]), ladder, credit=False, cutoff_price=cut, sleeve=C.SLEEVE_CONDOR,
+                                  meta={"record": r, "reason": reason, "mid": mid, "natural": natural,
+                                        "tdte": tdte, "expiry": exp}))
+    return jobs, rows
+
+
+def _condor_spot(ctx: Ctx, sym: str, preview: bool) -> tuple[float | None, str | None]:
+    """(live spot, None), or for a preview with no usable live bar (e.g. after hours)
+    the last trade from the snapshot and a note. Entries never use the fallback."""
+    try:
+        return ctx.signal(sym).close, None
+    except Exception as e:                      # noqa: BLE001  (stale / missing data: fail closed)
+        if not preview:
+            return None, f"data error {e}"
+        try:
+            px = ctx.broker.stock_snapshot(sym)["price"]
+        except Exception:                       # noqa: BLE001
+            px = None
+        return px, f"data error {e}; preview priced on the last trade {px}"
+
+
+def plan_condor_entry(ctx: Ctx, condors: dict, acct: dict, kill: tuple[bool, str], used: float,
+                      bp: float | None, avoid: set | None = None, preview: bool = False):
+    """(jobs, row) for the condor sleeve: one condor at a time, opened at the
+    first daily run when flat. ``used`` is the shared budget already taken (dip
+    spreads + open condors); the condor's max loss is <= CONDOR_RISK_PER_POSITION
+    of equity and the total stays <= RISK_TOTAL. The kill switch and the data /
+    quote freshness checks block it exactly as they block dip entries.
+    ``preview`` prices it even when blocked (display only; never a job)."""
+    sym = C.CONDOR_UNDERLYING
+    row = {"symbol": f"{sym} condor"}
+    if len(condors) >= C.CONDOR_MAX_POSITIONS:
+        row["action"] = f"hold: {len(condors)} condor(s) open (max {C.CONDOR_MAX_POSITIONS}); next entry when flat"
+        return [], row
+    blocked = f"kill switch: {kill[1]}" if kill[0] else None
+    if blocked and not preview:
+        row["action"] = blocked
+        return [], row
+    spot, note = _condor_spot(ctx, sym, preview)
+    row["spot"] = spot
+    if note:
+        blocked = (blocked + "; " if blocked else "") + note
+        if not preview or spot is None:
+            row["action"] = f"skip: {note}" if not preview else blocked
+            return [], row
+    lo = ctx.today + dt.timedelta(days=C.CONDOR_DTE_MIN)
+    hi = ctx.today + dt.timedelta(days=C.CONDOR_DTE_MAX)
+    try:
+        chain = ctx.broker.option_chain(sym, lo, hi, cp="P") + ctx.broker.option_chain(sym, lo, hi, cp="C")
+    except Exception as e:                      # noqa: BLE001
+        row["action"] = f"skip: option chain unavailable: {e}" if not blocked else blocked
+        return [], row
+    pick, why = S.pick_condor(chain, sym, ctx.today, spot)
+    if pick is None:
+        row["action"] = f"skip: no condor: {why}" if not blocked else f"{blocked} | preview: {why}"
+        return [], row
+    row["pick"] = pick
+    bad = S.check_condor(pick, now=ctx.now() if ctx.strict else None)
+    if avoid and pick.symbols & avoid:
+        bad = bad or "a leg is held by the dip sleeve"
+    ladder = S.condor_entry_ladder(pick)
+    n, why = S.size_position(acct["equity"], pick.width, ladder[-1], used, bp,
+                             risk_per_position=C.CONDOR_RISK_PER_POSITION)
+    row.update(ladder=ladder, size=n, size_why=why, used_before=used)
+    if blocked:
+        row["action"] = f"{blocked} | preview: {'guard: ' + bad if bad else f'would size {n}x ({why})'}"
+        return [], row
+    if bad:
+        row["action"] = f"skip: {bad}"
+        return [], row
+    if n == 0:
+        row["action"] = f"skip: size 0: {why}"
+        return [], row
+    row["action"] = f"OPEN {n}x  ({why})"
+    row["qty"] = n
+    job = execution.Job(pick.id, "open", execution.condor_open_legs(*(q.symbol for q in pick.legs)), n, ladder,
+                        credit=True, sleeve=C.SLEEVE_CONDOR, meta={"pick": pick, "spot": pick.spot})
+    return [job], row
+
+
+def print_condor(acct, exit_rows, entry_row, condor_on: bool, used_total: float | None = None):
+    log.info("-- condor sleeve (%s): open %d", "ENABLED" if condor_on else "disabled; exits only", len(exit_rows))
+    for r in exit_rows:
+        log.info("   %-34s x%-3s credit %s (mid %s)  cost mid %s  nat %s  held %sd  tdte %s  spot %s  max loss $%s -> %s",
+                 r["id"], r["qty"], _fmt(float(r["entry_credit"])), _fmt(r.get("entry_mid")), _fmt(r["mid_debit"]),
+                 _fmt(r["natural_debit"]), r["held"], r["tdte"], _fmt(r["spot"]), f"{r['max_loss']:,.0f}",
+                 r["reason"] or "hold to expiry")
+    if entry_row is None:
+        return
+    log.info("   %-5s spot %s -> %s", entry_row["symbol"], _fmt(entry_row.get("spot")), entry_row.get("action"))
+    p = entry_row.get("pick")
+    if p:
+        log.info("         %s %s DTE %d: put  sell %s (Δ%s %s/%s) buy %s (%s/%s) wing %g", p.underlying, p.expiry,
+                 p.dte, p.put_short.symbol, _fmt(p.put_short.delta), _fmt(p.put_short.bid), _fmt(p.put_short.ask),
+                 p.put_long.symbol, _fmt(p.put_long.bid), _fmt(p.put_long.ask), p.put_width)
+        log.info("         %s %s DTE %d: call sell %s (Δ%s %s/%s) buy %s (%s/%s) wing %g", p.underlying, p.expiry,
+                 p.dte, p.call_short.symbol, _fmt(p.call_short.delta), _fmt(p.call_short.bid), _fmt(p.call_short.ask),
+                 p.call_long.symbol, _fmt(p.call_long.bid), _fmt(p.call_long.ask), p.call_width)
+        log.info("         strikes %g/%g | %g/%g (wings 3%% of spot = %.2f) mid credit %.2f nat %.2f (%.0f%% of width %g)",
+                 p.put_long.strike, p.put_short.strike, p.call_short.strike, p.call_long.strike,
+                 C.CONDOR_WING_PCT * p.spot, p.mid_credit, p.natural_credit, 100 * p.mid_credit / p.width, p.width)
+    if entry_row.get("ladder") and p:
+        n = entry_row.get("size") or 0
+        per = S.max_loss(p.width, entry_row["ladder"][-1], 1)
+        eq = acct["equity"]
+        log.info("         limit credits (re-priced in order): %s; max loss $%s per condor (worst ladder credit)",
+                 ", ".join(f"{x:.2f}" for x in entry_row["ladder"]), f"{per:,.0f}")
+        if n == 0:
+            log.info("         sizing: 0x (%s); condor cap %.0f%% of equity = $%s, shared budget used $%s of $%s",
+                     entry_row.get("size_why"), 100 * C.CONDOR_RISK_PER_POSITION,
+                     f"{C.CONDOR_RISK_PER_POSITION * eq:,.0f}", f"{entry_row.get('used_before', 0):,.0f}",
+                     f"{C.RISK_TOTAL * eq:,.0f}")
+            return
+        log.info("         sizing: %dx -> max loss $%s = %.1f%% of equity (cap %.0f%%); shared budget used before "
+                 "$%s, after $%s of $%s (%.0f%% cap)", n, f"{per * n:,.0f}", 100 * per * n / eq,
+                 100 * C.CONDOR_RISK_PER_POSITION, f"{entry_row.get('used_before', 0):,.0f}",
+                 f"{entry_row.get('used_before', 0) + per * n:,.0f}", f"{C.RISK_TOTAL * eq:,.0f}", 100 * C.RISK_TOTAL)
 
 
 # ---------------------------------------------------------------- reporting
@@ -331,11 +542,17 @@ def trade_id(key: str, entry_date: str, closed: str, order_id: str | None) -> st
     return f"{key}-{entry_date}-{closed}-{(order_id or 'x')[-12:]}"
 
 
-def apply_results(jobs, records: dict, today: dt.date, run_id, persist: bool) -> list[dict]:
+def apply_results(jobs, records: dict, today: dt.date, run_id, persist: bool,
+                  condors: dict | None = None) -> list[dict]:
+    """Book fills: dip jobs into ``records``, condor jobs into ``condors``."""
     trades = []
+    condors = {} if condors is None else condors
     for j in jobs:
         try:
-            t = _apply_one(j, records, today, run_id, persist)
+            if j.sleeve == C.SLEEVE_CONDOR:
+                t = _apply_condor(j, condors, today, run_id, persist)
+            else:
+                t = _apply_one(j, records, today, run_id, persist)
         except Exception as e:                  # noqa: BLE001  (one bad job must not lose the others)
             log.error("apply_results %s %s failed: %s\n%s", j.purpose, j.key, e, traceback.format_exc())
             continue
@@ -399,6 +616,58 @@ def _apply_one(j, records: dict, today: dt.date, run_id, persist: bool):
     return t
 
 
+def _apply_condor(j, condors: dict, today: dt.date, run_id, persist: bool):
+    q = int(round(j.filled_qty))
+    orow = {"key": j.key, "sleeve": C.SLEEVE_CONDOR, "purpose": j.purpose, "status": j.status, "qty": j.qty,
+            "filled_qty": q, "avg_price": j.avg_price, "order_ids": j.order_ids, "fills": j.fills,
+            "history": j.history, "error": j.error, "date": today.isoformat()}
+    log.info("condor %s %s: %s %d/%d @ %s", j.purpose, j.key, j.status, q, j.qty, _fmt(j.avg_price))
+    if persist:
+        state.append(state.ORDERS, orow)
+        db.insert("options_live_orders", {
+            "id": j.order_ids[-1] if j.order_ids else f"none-{j.key}-{today}", "run_id": run_id,
+            "spread_id": j.key, "underlying": j.key.split("-")[0], "purpose": j.purpose, "sleeve": C.SLEEVE_CONDOR,
+            "qty": j.qty, "filled_qty": q, "limit_prices": j.prices, "avg_price": j.avg_price,
+            "status": j.status, "attempts": len(j.order_ids), "history": j.history, "error": j.error,
+            "submitted_at": j.history[0]["t"] if j.history else None}, upsert_on="id")
+    if q <= 0:
+        return None
+    if j.purpose == "open":
+        p = j.meta["pick"]
+        prev = condors.get(j.key)
+        if prev:
+            n0 = int(prev["qty"])
+            credit = (float(prev["entry_credit"]) * n0 + j.avg_price * q) / (n0 + q)
+            condors[j.key] = {**prev, "qty": n0 + q, "entry_credit": round(credit, 4),
+                              "order_ids": list(prev.get("order_ids", [])) + j.order_ids}
+            return None
+        condors[j.key] = {"sleeve": C.SLEEVE_CONDOR, "underlying": p.underlying, "expiry": p.expiry.isoformat(),
+                          "put_short_symbol": p.put_short.symbol, "put_long_symbol": p.put_long.symbol,
+                          "call_short_symbol": p.call_short.symbol, "call_long_symbol": p.call_long.symbol,
+                          "put_short_strike": p.put_short.strike, "put_long_strike": p.put_long.strike,
+                          "call_short_strike": p.call_short.strike, "call_long_strike": p.call_long.strike,
+                          "qty": q, "entry_date": today.isoformat(), "entry_credit": j.avg_price,
+                          "entry_mid": p.mid_credit, "entry_spot": p.spot, "dte": p.dte,
+                          "put_short_delta": p.put_short.delta, "call_short_delta": p.call_short.delta,
+                          "order_ids": j.order_ids}
+        return None
+    r = j.meta["record"]
+    credit = float(r["entry_credit"])
+    pnl = round((credit - j.avg_price) * 100 * q, 2)
+    fill_ids = [o for o in j.order_ids if o in j.fills]
+    t = condor_trade_row(j.key, r, q, today, fill_ids[-1] if fill_ids else None, j.avg_price, pnl,
+                         S.max_loss(S.condor_width(r), credit, q), j.meta["reason"])
+    left = int(r["qty"]) - q
+    if left > 0:
+        condors[j.key] = {**r, "qty": left}
+    else:
+        condors.pop(j.key, None)
+    if persist:
+        state.append(state.TRADES, t)
+        db.insert("options_live_trades", t, upsert_on="id")
+    return t
+
+
 # ---------------------------------------------------------------- book: broker positions vs local records
 def _recover_entry(broker: Broker, sid: str, short_symbol: str, today: dt.date) -> tuple[str, str] | None:
     """(entry date, source) for a spread held at the broker with no local record:
@@ -419,6 +688,21 @@ def _recover_entry(broker: Broker, sid: str, short_symbol: str, today: dt.date) 
     return t.isoformat(), "fills"
 
 
+def _leg_exit(acts: list[dict], sym, close_side):
+    """(exit price per share, how) of one leg from FILL / OPEXP / OPASN / OPEXC activities."""
+    kinds = {a.get("activity_type") for a in acts if a.get("symbol") == sym}
+    if "OPASN" in kinds or "OPEXC" in kinds:
+        return None, "assigned"
+    fl = [a for a in acts if a.get("symbol") == sym and a.get("activity_type") == "FILL"
+          and a.get("side") == close_side]
+    n = sum(float(a.get("qty") or 0) for a in fl)
+    if n > 0:
+        return sum(float(a["price"]) * float(a.get("qty") or 0) for a in fl) / n, "closed"
+    if "OPEXP" in kinds:
+        return 0.0, "expired"
+    return None, "unknown"
+
+
 def _external_close(broker: Broker, v: dict, today: dt.date) -> dict:
     """Best-effort P&L for a spread that left the broker outside the bot (expired,
     assigned, closed by hand): FILL / OPEXP / OPASN / OPEXC activities since entry."""
@@ -430,21 +714,8 @@ def _external_close(broker: Broker, v: dict, today: dt.date) -> dict:
         log.warning("%s: activities unavailable: %s", v["id"], e)
         acts = []
 
-    def leg_exit(sym, close_side):
-        kinds = {a.get("activity_type") for a in acts if a.get("symbol") == sym}
-        if "OPASN" in kinds or "OPEXC" in kinds:
-            return None, "assigned"
-        fl = [a for a in acts if a.get("symbol") == sym and a.get("activity_type") == "FILL"
-              and a.get("side") == close_side]
-        n = sum(float(a.get("qty") or 0) for a in fl)
-        if n > 0:
-            return sum(float(a["price"]) * float(a.get("qty") or 0) for a in fl) / n, "closed"
-        if "OPEXP" in kinds:
-            return 0.0, "expired"
-        return None, "unknown"
-
-    s_px, s_how = leg_exit(v.get("short_symbol"), "buy")
-    l_px, l_how = leg_exit(v.get("long_symbol"), "sell")
+    s_px, s_how = _leg_exit(acts, v.get("short_symbol"), "buy")
+    l_px, l_how = _leg_exit(acts, v.get("long_symbol"), "sell")
     reason = f"external_{s_how}"
     if s_px is not None and l_px is not None and v.get("entry_credit") is not None:
         exit_debit = round(s_px - l_px, 4)
@@ -459,17 +730,21 @@ def _external_close(broker: Broker, v: dict, today: dt.date) -> dict:
             "pnl_pct": round(pnl / ml, 4) if pnl is not None and ml else None, "exit_reason": reason}
 
 
-def load_book(broker: Broker, today: dt.date, persist: bool):
-    """(records, orphan option legs, stock positions, raw positions)."""
+def load_book(broker: Broker, today: dt.date, persist: bool, condors_out: dict | None = None):
+    """(dip records, orphan option legs, stock positions, raw positions).
+    The condor sleeve's records are written into ``condors_out`` when given.
+    Legs are split by sleeve with the state store (S.group_book), so condor legs
+    are never paired into dip spreads."""
     pos = broker.positions()
     stocks = [p for p in pos if S.parse_occ(p.get("symbol", "")) is None]
-    spreads, orphans = S.group_spreads([p for p in pos if p not in stocks])
+    stored = state.load_positions()
+    stored_condors = state.load_condors()
+    spreads, condors, orphans = S.group_book([p for p in pos if p not in stocks], stored_condors, stored)
     for o in orphans:
         log.warning("unpaired option leg (not traded automatically): %s qty %s (unmatched %s)",
                     o.get("symbol"), o.get("qty"), o.get("unmatched_qty"))
     for p in stocks:
         log.error("STOCK position %s qty %s in the options account: assignment or exercise", p["symbol"], p["qty"])
-    stored = state.load_positions()
     records, adopted, vanished = state.reconcile(spreads, stored, today)
     for a in adopted:
         rec = _recover_entry(broker, a, records[a]["short_symbol"], today)
@@ -488,7 +763,69 @@ def load_book(broker: Broker, today: dt.date, persist: bool):
                 db.insert("options_live_trades", t, upsert_on="id")
     if persist and (adopted or vanished):
         state.save_positions(records)
+    crecords = load_condor_book(broker, condors, stored_condors, today, persist)
+    if condors_out is not None:
+        condors_out.clear()
+        condors_out.update(crecords)
     return records, orphans, stocks, pos
+
+
+def load_condor_book(broker: Broker, condors, stored: dict, today: dt.date, persist: bool) -> dict:
+    """Condor records for the condors at the broker: adopt untracked ones, journal vanished ones."""
+    if not condors and not stored:
+        return {}
+    records, adopted, vanished = state.reconcile_condors(condors, stored, today)
+    for a in adopted:
+        rec = _recover_entry(broker, a, records[a]["put_short_symbol"], today)
+        if rec:
+            records[a]["entry_date"], records[a]["entry_date_source"] = rec
+        log.warning("adopted condor %s with no local record; entry date %s", a,
+                    f"{rec[0]} from the {rec[1]}" if rec else "unknown, set to today")
+    for v in vanished:
+        log.warning("condor %s is no longer at the broker (expired/assigned/closed outside the bot)", v["id"])
+        if persist:
+            t = _external_close_condor(broker, v, today)
+            log.warning("   journaled as %s, P&L %s", t["exit_reason"], _fmt(t["pnl"]))
+            state.append(state.TRADES, t)
+            if t["pnl"] is not None:
+                db.insert("options_live_trades", t, upsert_on="id")
+    if persist and (adopted or vanished):
+        state.save_condors(records)
+    return records
+
+
+def _external_close_condor(broker: Broker, v: dict, today: dt.date) -> dict:
+    qty = int(v.get("qty") or 0)
+    try:
+        acts = broker.activities(["FILL", "OPEXP", "OPASN", "OPEXC"], v.get("entry_date") or today.isoformat())
+    except Exception as e:                      # noqa: BLE001
+        log.warning("%s: activities unavailable: %s", v["id"], e)
+        acts = []
+    legs = [_leg_exit(acts, v.get(k), side) for k, side in (("put_short_symbol", "buy"), ("put_long_symbol", "sell"),
+                                                            ("call_short_symbol", "buy"), ("call_long_symbol", "sell"))]
+    hows = [h for _, h in legs]
+    how = "assigned" if "assigned" in hows else ("closed" if "closed" in hows else hows[0])
+    exit_debit = pnl = None
+    if all(px is not None for px, _ in legs) and v.get("entry_credit") is not None:
+        exit_debit = round(legs[0][0] - legs[1][0] + legs[2][0] - legs[3][0], 4)
+        pnl = round((float(v["entry_credit"]) - exit_debit) * 100 * qty, 2)
+    ml = S.max_loss(S.condor_width(v), float(v.get("entry_credit") or 0), qty) if qty else 0
+    return condor_trade_row(v["id"], v, qty, today, "external", exit_debit, pnl, ml, f"external_{how}")
+
+
+CONDOR_TRADE_COLS = ("sleeve", "call_short_strike", "call_long_strike")
+
+
+def condor_trade_row(cid: str, r: dict, qty: int, today: dt.date, order_id, exit_debit, pnl, ml, reason) -> dict:
+    """A trade row for options_live_trades: the put strikes go in short/long_strike,
+    the call strikes and the sleeve in the columns migration 006 adds."""
+    return {"id": trade_id(cid, r.get("entry_date", "?"), today.isoformat(), order_id),
+            "spread_id": cid, "underlying": r.get("underlying"), "expiry": r.get("expiry"),
+            "short_strike": r.get("put_short_strike"), "long_strike": r.get("put_long_strike"), "qty": qty,
+            "opened_at": r.get("entry_date"), "closed_at": today.isoformat(), "entry_credit": r.get("entry_credit"),
+            "exit_debit": exit_debit, "pnl": pnl, "pnl_pct": round(pnl / ml, 4) if pnl is not None and ml else None,
+            "exit_reason": reason, "sleeve": C.SLEEVE_CONDOR, "call_short_strike": r.get("call_short_strike"),
+            "call_long_strike": r.get("call_long_strike")}
 
 
 def orphan_qty(o: dict) -> int:
@@ -523,9 +860,10 @@ def client_order_id_for(*parts) -> str:
     return client_order_id(*parts)
 
 
-def _settle(broker: Broker, jobs, records: dict, today: dt.date, run_id) -> list[dict]:
+def _settle(broker: Broker, jobs, records: dict, today: dt.date, run_id, condors: dict | None = None) -> list[dict]:
     """After working orders (or an exception while working them): cancel the
-    bot's orders, book every fill, save positions. Never raises."""
+    bot's orders, book every fill, save positions (and the condor records when a
+    condor job ran). Never raises."""
     try:
         left = broker.cancel_all(timeout=20) if broker.execute else []
         if left:
@@ -534,12 +872,17 @@ def _settle(broker: Broker, jobs, records: dict, today: dt.date, run_id) -> list
         log.error("cancel sweep failed: %s", e)
     trades = []
     try:
-        trades = apply_results(jobs, records, today, run_id, persist=True)
+        trades = apply_results(jobs, records, today, run_id, persist=True, condors=condors)
     finally:
         try:
             state.save_positions(records)
         except Exception as e:                  # noqa: BLE001
             log.error("SAVING POSITIONS FAILED: %s", e)
+        if condors is not None and any(j.sleeve == C.SLEEVE_CONDOR for j in jobs):
+            try:
+                state.save_condors(condors)
+            except Exception as e:              # noqa: BLE001
+                log.error("SAVING CONDOR POSITIONS FAILED: %s", e)
     return trades
 
 
@@ -631,7 +974,9 @@ def run_daily(args) -> int:
         secs = (decide - now_et()).total_seconds()
         log.info("waiting %.0fs for the decision time (%s ET)", secs, f"{decide:%H:%M}")
         time.sleep(max(secs, 0))
-    records, orphans, stocks, _ = load_book(broker, today, persist)
+    condor_on = condor_enabled(args)
+    condors: dict = {}
+    records, orphans, stocks, _ = load_book(broker, today, persist, condors_out=condors)
     if stocks:
         warnings.append(f"assignment: {len(stocks)} stock position(s)")
         if args.execute:
@@ -650,37 +995,67 @@ def run_daily(args) -> int:
         warnings.append(f"EXPIRING TODAY, past Alpaca's 15:30 expiration handling: {', '.join(late)}")
     closing = {j.key for j in exit_jobs}
     symbols = args.symbols.split(",") if args.symbols else C.universe()
-    entry_jobs, entry_rows = plan_entries(ctx, records, acct, kill, symbols, preview=args.preview)
+    # condor sleeve: exits whenever a condor is held (even with the flag off), entries only when enabled.
+    # It is planned before the dip entries so its max loss is reserved in the shared RISK_TOTAL budget.
+    cexit_jobs, cexit_rows = plan_condor_exits(ctx, condors, sessions, mode="daily",
+                                               deadline=condor_deadline(today, close_at))
+    reserved = condor_open_max_loss(condors)
+    centry_jobs, crow = [], None
+    dip_acct = acct
+    if condor_on:
+        centry_jobs, crow = plan_condor_entry(ctx, condors, acct, kill, used=open_max_loss(records) + reserved,
+                                              bp=acct.get("options_buying_power"), avoid=dip_symbols(records),
+                                              preview=args.preview)
+        for j in centry_jobs:
+            p = j.meta["pick"]
+            reserved += S.max_loss(p.width, j.prices[-1], j.qty)
+            if acct.get("options_buying_power") is not None:
+                dip_acct = {**acct, "options_buying_power": acct["options_buying_power"] - p.width * 100 * j.qty}
+    avoid = condor_symbols(condors) | {s for j in centry_jobs for s in j.meta["pick"].symbols}
+    entry_jobs, entry_rows = plan_entries(ctx, records, dip_acct, kill, symbols, preview=args.preview,
+                                          reserved=reserved, avoid=avoid or None)
     mode = "EXECUTE" if args.execute else "DRY RUN"
     print_plan(acct, kill, vix, exit_rows, entry_rows, mode, decide)
+    if condor_on or condors:
+        print_condor(acct, cexit_rows, crow, condor_on)
+        log.info("=" * 96)
+    if crow is not None:
+        entry_rows_db = entry_rows + [crow]
+    else:
+        entry_rows_db = entry_rows
     warnings += ctx.warnings
     run = db.insert("options_live_runs", {
         "run_date": today, "mode": "execute" if args.execute else "dry_run", "kind": "daily",
         "status": "planned", "started_at": dt.datetime.now(dt.timezone.utc), "equity": acct["equity"],
         "vix": vix["vix"], "vix3m": vix["vix3m"], "kill_switch": kill[0],
-        "signals": [{k: v for k, v in r.items() if k not in ("pick",)} for r in entry_rows],
-        "n_exits": len(exit_jobs), "n_entries": len(entry_jobs),
-        "message": f"{len(exit_jobs)} exits, {len(entry_jobs)} entries planned"})
+        "signals": [{k: v for k, v in r.items() if k not in ("pick",)} for r in entry_rows_db],
+        "n_exits": len(exit_jobs) + len(cexit_jobs), "n_entries": len(entry_jobs) + len(centry_jobs),
+        "message": f"{len(exit_jobs)} exits, {len(entry_jobs)} entries planned"
+                   + (f"; condor {len(cexit_jobs)} exits, {len(centry_jobs)} entries" if condor_on or condors else "")})
     run_id = run[0]["id"] if run else None
     if not args.execute:
         window = (f"from {max(now_et(), decide):%H:%M} to {cutoff:%H:%M} ET" if now_et() < cutoff
                   else f"in the {decide:%H:%M}-{cutoff:%H:%M} ET window (market already closed; prices are the latest available)")
         log.info("DRY RUN: nothing sent. %d exit(s) and %d entr%s would be worked %s.",
                  len(exit_jobs), len(entry_jobs), "y" if len(entry_jobs) == 1 else "ies", window)
+        if condor_on or condors:
+            log.info("DRY RUN: condor sleeve: %d exit(s), %d entr%s.", len(cexit_jobs), len(centry_jobs),
+                     "y" if len(centry_jobs) == 1 else "ies")
         for w in warnings:
             log.warning("warning: %s", w)
         db.heartbeat("ok", f"{today}: dry run, {len(exit_jobs)} exits / {len(entry_jobs)} entries planned")
         return 0
     state.mark_ran(today)
-    jobs = exit_jobs + [j for j in entry_jobs if j.key not in closing]
+    jobs = exit_jobs + [j for j in entry_jobs if j.key not in closing] + cexit_jobs + centry_jobs
     trades = []
     try:
         execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=hard_stop)
     finally:
-        trades = _settle(broker, jobs, records, today, run_id)
+        trades = _settle(broker, jobs, records, today, run_id, condors=condors)
     n_open = sum(1 for j in entry_jobs if j.filled_qty > 0)
     n_close = sum(1 for j in exit_jobs if j.filled_qty > 0)
-    unfilled = [j for j in exit_jobs if j.remaining > 0]
+    unfilled = [j for j in exit_jobs + cexit_jobs if j.remaining > 0]
+    cblocked = [r["id"] for r in cexit_rows if r.get("blocked")]
     urgent = [j.key for j in unfilled if j.meta.get("tdte", 99) <= C.CLOSE_DTE_TRADING_DAYS]
     msg = (f"{today}: opened {n_open}, closed {n_close}, {len(records)} open, "
            f"realized ${sum(t['pnl'] for t in trades):,.2f}")
@@ -689,9 +1064,12 @@ def run_daily(args) -> int:
     if urgent:
         msg += (f"; EXPIRY EXIT NOT FILLED (tdte<=1): {', '.join(urgent)}: the --sweep run closes them after "
                 f"the open tomorrow, before Alpaca's 15:30 expiration handling; check them by hand")
+    if cexit_jobs or centry_jobs or condors:
+        msg += (f"; condor: opened {sum(1 for j in centry_jobs if j.filled_qty > 0)}, "
+                f"closed {sum(1 for j in cexit_jobs if j.filled_qty > 0)}, {len(condors)} open")
     if warnings:
         msg += "; warnings: " + " | ".join(warnings)
-    level = "error" if urgent or stocks else ("warning" if unfilled or warnings else "ok")
+    level = "error" if urgent or stocks or cblocked else ("warning" if unfilled or warnings else "ok")
     (log.error if level == "error" else log.warning if level == "warning" else log.info)(msg)
     if run_id:
         db.update("options_live_runs", {"id": run_id}, {"status": "executed", "message": msg[:2000]})
@@ -723,23 +1101,32 @@ def run_intraday(args, kind: str = "intraday") -> int:
         log.info("%s check outside its window (%s-%s ET)", kind, f"{start:%H:%M}", f"{stop:%H:%M}")
         return 0
     _take_lock(args, 30 if kind == "sweep" else 0)
-    records, orphans, stocks, _ = load_book(broker, today, args.execute)
+    condors: dict = {}
+    records, orphans, stocks, _ = load_book(broker, today, args.execute, condors_out=condors)
     warnings = []
     if stocks:
         warnings.append(f"assignment: {len(stocks)} stock position(s)")
         if args.execute:
             warnings += flatten_stock(broker, stocks, today)
-    if not records:
+    if not records and not condors:
         log.info("%s: no open spreads", kind)
         if warnings:
             db.heartbeat("error", f"{today} {kind}: " + " | ".join(warnings))
         return 0
     ctx = Ctx(broker, today, strict=args.execute)
     spy = broker.daily_bars("SPY", today - dt.timedelta(days=30), today - dt.timedelta(days=1))
-    jobs, rows = plan_exits(ctx, records, sessions_list(broker, spy.index, today), end_of_day=False, mode=kind)
+    sessions = sessions_list(broker, spy.index, today)
+    jobs, rows = plan_exits(ctx, records, sessions, end_of_day=False, mode=kind)
     for r in rows:
         log.info("%s %-26s mid %s credit %s -> %s", kind, r["id"], _fmt(r["mid_debit"]),
                  _fmt(float(r["entry_credit"])), r["reason"] or "hold")
+    deadline = condor_deadline(today, sess["close_at"])
+    cjobs, crows = plan_condor_exits(ctx, condors, sessions, mode=kind, deadline=deadline)
+    for r in crows:
+        log.info("%s condor %-34s mid %s credit %s -> %s", kind, r["id"], _fmt(r["mid_debit"]),
+                 _fmt(float(r["entry_credit"])), r["reason"] or "hold to expiry")
+    cblocked = [r["id"] for r in crows if r.get("blocked")]
+    jobs += cjobs
     for j in jobs:                              # intraday take-profits do not chase
         if j.meta["reason"] == "take_profit":
             j.cutoff_price = None
@@ -748,21 +1135,23 @@ def run_intraday(args, kind: str = "intraday") -> int:
         if jobs:
             log.info("DRY RUN: %d %s exit(s) not sent", len(jobs), kind)
         if warnings and args.execute:
-            db.heartbeat("warning", f"{today} {kind}: " + " | ".join(warnings))
+            db.heartbeat("error" if cblocked else "warning", f"{today} {kind}: " + " | ".join(warnings))
         return 0
     if any(j.meta["reason"] == "expiry_day_sweep" for j in jobs):
         warnings.append("expiry-day sweep: " + ", ".join(j.key for j in jobs if j.meta["reason"] == "expiry_day_sweep"))
     cutoff = min(now + dt.timedelta(minutes=4), stop)
+    hard_stop = cutoff + dt.timedelta(minutes=1)
+    if cjobs:                                   # condor orders never work past the expiry-day deadline
+        cutoff, hard_stop = min(cutoff, deadline), min(hard_stop, deadline)
     try:
-        execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=cutoff + dt.timedelta(minutes=1),
-                              step_wait=40)
+        execution.work_orders(broker, jobs, cutoff=cutoff, hard_stop=hard_stop, step_wait=40)
     finally:
-        _settle(broker, jobs, records, today, None)
+        _settle(broker, jobs, records, today, None, condors=condors)
     left = [j.key for j in jobs if j.remaining > 0 and j.meta["reason"] == "expiry_day_sweep"]
     if left:
         warnings.append(f"EXPIRING TODAY AND NOT CLOSED: {', '.join(left)}; close by hand before 15:30 ET")
     if warnings:
-        db.heartbeat("error" if left or stocks else "warning", f"{today} {kind}: " + " | ".join(warnings))
+        db.heartbeat("error" if left or stocks or cblocked else "warning", f"{today} {kind}: " + " | ".join(warnings))
     return 0
 
 
@@ -777,25 +1166,31 @@ def run_close_all(args) -> int:
             log.error("market is closed; emergency close needs an open market")
             return 1
         broker.cancel_all()
-    records, orphans, stocks, _ = load_book(broker, today, args.execute)
+    condors: dict = {}
+    records, orphans, stocks, _ = load_book(broker, today, args.execute, condors_out=condors)
     ctx = Ctx(broker, today)
     sessions = signals.sessions_from_bars([], today)
     jobs, rows = plan_exits(ctx, records, sessions, end_of_day=True, force_all=True, mode="close_all")
     for r in rows:
         log.info("close-all %-26s x%s mid %s nat %s", r["id"], r["qty"], _fmt(r["mid_debit"]), _fmt(r["natural_debit"]))
+    cjobs, crows = plan_condor_exits(ctx, condors, sessions, mode="close_all", force_all=True)
+    for r in crows:
+        log.info("close-all condor %-34s x%s mid %s nat %s", r["id"], r["qty"], _fmt(r["mid_debit"]),
+                 _fmt(r["natural_debit"]))
+    jobs += cjobs
     for o in orphans:
         log.info("close-all unpaired leg %s unmatched qty %s", o.get("symbol"), o.get("unmatched_qty", o.get("qty")))
     for p in stocks:
         log.info("close-all stock %s qty %s (assignment)", p["symbol"], p["qty"])
     if not args.execute:
-        log.info("DRY RUN: %d spread(s), %d unpaired leg(s) and %d stock position(s) would be closed",
+        log.info("DRY RUN: %d spread(s)/condor(s), %d unpaired leg(s) and %d stock position(s) would be closed",
                  len(jobs), len(orphans), len(stocks))
         return 0
     try:
         execution.work_orders(broker, jobs, cutoff=now + dt.timedelta(minutes=3),
                               hard_stop=now + dt.timedelta(minutes=5), step_wait=30)
     finally:
-        _settle(broker, jobs, records, today, None)
+        _settle(broker, jobs, records, today, None, condors=condors)
     if orphans:
         quotes = broker.option_quotes([o["symbol"] for o in orphans])
         for o in orphans:
@@ -867,6 +1262,8 @@ def health() -> int:
     line("supabase", True if db.enabled() else None, "enabled" if db.enabled() else "not configured (writes are no-ops)")
     rec = state.load_positions()
     line("state", True, f"{len(rec)} stored spreads in {C.STATE_DIR}")
+    line("condor sleeve", True, f"{'ENABLED' if C.CONDOR_ENABLED else 'disabled (CONDOR_ENABLED = False)'}; "
+                                f"{len(state.load_condors())} stored condor(s)")
     return 0 if ok else 1
 
 
@@ -883,6 +1280,8 @@ def main(argv=None) -> int:
     ap.add_argument("--symbols", help="comma-separated override of the universe")
     ap.add_argument("--preview", action="store_true",
                     help="also pick and price the spread for symbols without a signal (display only)")
+    ap.add_argument("--condor", action="store_true",
+                    help="force the SPY iron condor sleeve on for this run (config CONDOR_ENABLED is the default)")
     args = ap.parse_args(argv)
     args._lock = None
     setup_logging()

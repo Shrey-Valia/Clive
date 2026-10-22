@@ -19,6 +19,23 @@ This bot paper-trades the research finalist from `tuning/signals/REPORT.md`, `di
 
 > **Credit floor.** The brief asked for a 15%-of-width minimum. In the research backtest, 0.25Δ/0.10Δ spreads at 7–14 DTE collected a median of 12.3% of width, with a minimum of 6.8%. **51 of the 54 SPY/QQQ/IWM trades were below 15%.** A 15% floor would turn the strategy off, so `MIN_CREDIT_FRAC` defaults to 6.5%. Set it to `0.15` in `config.py` if you want the stricter rule anyway.
 
+## Second sleeve: SPY iron condor (off by default)
+
+The spreads finalist F1 from `tuning/spreads/REPORT.md` runs as a second, independent sleeve. It is **off** (`CONDOR_ENABLED = False` in `config.py`). While it is off, the dip sleeve's order plans are unchanged; `tests/test_condor.py` checks them against a plan generated from the code as it was before the sleeve existed.
+
+| | Rule |
+|---|---|
+| Structure | SPY. Sell a put and a call near 0.10Δ (within 0.05) and buy wings at the strikes nearest 3% of spot beyond them, all on one expiry, 50–70 DTE (target 60, monthlies preferred, as in the backtest). |
+| Entry | When no condor is open, at the next daily run (the 15:55 decision time). The entry date is recorded. One condor at a time. The kill switch and every data/quote freshness check block it exactly as they block dip entries. |
+| Guards | Credit > 60% of the wider wing (bad quote) or ≤ $0.10 is skipped. Same leg/combo bid-ask limits as the dip sleeve. |
+| Order | One 4-leg mleg limit order (ratio 1 each, `sell_to_open`/`buy_to_open`, negative limit = credit), the same mid-to-halfway ladder as dip entries. |
+| Exits | Held to expiry: no take-profit, no stop. Closed by the daily run on the last trading day **before** expiry (`CONDOR_CLOSE_DTE_TRADING_DAYS = 1`), walking to natural and natural + $0.05 at the cutoff. The 09:45 `--sweep` closes anything left on expiry day. No condor order is ever started on expiry day after 14:54 ET or worked past 15:00 ET (`CONDOR_EXPIRY_DAY_DEADLINE`; one hour before an early close), so nothing works into Alpaca's 15:30 expiration handling. A condor still open then is an `error` heartbeat: close it by hand. Exits run whenever a condor is held, even after the flag is turned off. |
+| Sizing | Max loss = (wider wing − credit) × 100 ≤ 20% of equity (`CONDOR_RISK_PER_POSITION`). `RISK_TOTAL` (50%) is now the **shared** budget: open dip spreads + the open condor's max loss (reserved) + anything planned this run. The condor is planned first in a run, then the dip entries get the rest. Options buying power is charged the wider wing. |
+| Book keeping | Condor records live in `state/condors.json` (`sleeve: "condor"`), dip records stay in `state/positions.json`. Orders are `options-condor-…` and `options-dip-…`. `strategy.group_book` lets each stored condor claim its own four legs before dip spreads are paired, so condor legs are never paired into a dip spread even on the same expiry. Leftover legs of a broken condor are unpaired legs tagged `sleeve: condor` (never traded automatically; `--close-all` closes them). Untracked call verticals plus a put vertical on one expiry are adopted as a condor. A dip entry never trades a symbol the condor holds, and the reverse (Alpaca nets positions per symbol). |
+| Dashboard | Condor rows need `dashboard/supabase/migrations/006_options_sleeves.sql` (adds `sleeve` and the call-leg columns). Dip rows don't. |
+
+Try it without enabling it: `$PY live/run.py --now --preview --condor`. To enable it, set `CONDOR_ENABLED = True` in `config.py` (or add `--condor` to the daily cron line); the sweep, intraday and close-all runs manage open condors either way.
+
 ## Decision time
 
 The signals are computed on a snapshot at `close − DECIDE_MINUTES_BEFORE_CLOSE` (default **5 → 15:55 ET**, 12:55 on half days). The research decided on the official close, so the decision time was re-validated in `tuning/live_timing/` (`run_timing.py`). The frozen rule was re-run on SPY/QQQ/IWM, 2024-03 to 2026-10, with the signal and 5DMA exit bar rebuilt from SIP minute bars at each time:
@@ -50,7 +67,8 @@ live/
   strategy.py    pure functions: signal, kill switch, strike pick, guards, sizing, price ladders, exits,
                  grouping option legs into spreads
   execution.py   order lifecycle: submit -> re-price -> cancel / aggressive fallback, all jobs in lockstep
-  state.py       live/state/: positions.json (entry date/credit), trades.jsonl, orders.jsonl, once-per-day guard
+  state.py       live/state/: positions.json (dip spreads), condors.json (condor sleeve), trades.jsonl, orders.jsonl,
+                 once-per-day guard
   db.py          Supabase PostgREST writes (no-op when unset)
   run.py         CLI (below)
   sync.py        16:15 ET: equity, legs, spreads, closed trades -> Supabase
