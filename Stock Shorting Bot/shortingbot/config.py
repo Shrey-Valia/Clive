@@ -56,8 +56,10 @@ MAX_PER_INDUSTRY = 2
 EARNINGS_GATE = True
 EARNINGS_SESSIONS = 2
 EARNINGS_NASDAQ_URL = "https://api.nasdaq.com/api/calendar/earnings"
-EARNINGS_REQUIRE_NASDAQ = False  # True: a Nasdaq failure alone fails closed (market_events only
-                                 # covers names in recent picks/positions, so it can miss new gainers)
+EARNINGS_REQUIRE_NASDAQ = True   # True: a name is cleared only if Nasdaq answered or market_events covers
+                                 # it (an EARNINGS row on or after the scan day). market_events only covers
+                                 # names in recent picks/positions, so it can miss new gainers.
+                                 # False: either source answering clears every name (the older rule)
 
 # Broker-side protective stop on each 09:31 short: a DAY buy-stop at fill x (1 + pct/100),
 # cancelled before the 15:55 cover. None = off. On since 2026-10-23 (owner-approved; the backtest

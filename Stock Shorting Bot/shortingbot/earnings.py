@@ -7,8 +7,10 @@ Two sources, both read-only:
   2. The Nasdaq earnings calendar (one call per date, every company that day), with a browser
      User-Agent, cached per date for the day in .cache/earnings/<today>/.
 
-A hit in either source excludes the name. A name neither source could answer for is excluded
-too (fail closed) and logged. Nothing here raises.
+A hit in either source excludes the name. A name is cleared only when Nasdaq answered, or
+market_events covers it (has an EARNINGS row dated on or after the scan day, so the sync tracks
+it); otherwise it is excluded (fail closed) and logged. EARNINGS_REQUIRE_NASDAQ False restores
+the older rule (either source answering clears every name). Nothing here raises.
 """
 from __future__ import annotations
 
@@ -31,7 +33,8 @@ def reason_hit(day: dt.date) -> str:
 
 
 def reason_unknown() -> str:
-    return "earnings calendar unavailable (market_events and Nasdaq both failed) - excluded, fail closed"
+    return ("earnings calendar unavailable (Nasdaq failed and market_events does not cover the name) - "
+            "excluded, fail closed")
 
 
 # ---------------------------------------------------------------- sources
@@ -60,6 +63,24 @@ def from_market_events(tickers: list[str], start: dt.date, end: dt.date) -> tupl
         except (KeyError, TypeError, ValueError):
             continue
     return out, True
+
+
+def market_events_coverage(tickers: list[str], start: dt.date) -> set[str]:
+    """The tickers market_events tracks: any EARNINGS row dated on or after `start`. Empty when
+    Supabase is off or the read failed (no name counts as covered)."""
+    if not tickers or not db.enabled():
+        return set()
+    params = {"select": "ticker", "kind": "eq.EARNINGS", "ticker": f"in.({','.join(sorted(set(tickers)))})",
+              "event_date": f"gte.{start.isoformat()}"}
+    try:
+        r = db._send("GET", "market_events", None, params, "")
+        rows = r.json() if r is not None else None
+        if not isinstance(rows, list):
+            return set()
+        return {row["ticker"] for row in rows if isinstance(row, dict) and row.get("ticker")}
+    except Exception as e:
+        log.warning("earnings: market_events coverage read failed: %s", e)
+        return set()
 
 
 def _nasdaq_cache(day: dt.date) -> str:
@@ -123,7 +144,11 @@ def blocks(tickers: list[str], scan_date: dt.date, next_sessions: list[dt.date])
     days = window(scan_date, next_sessions)
     me, me_ok = from_market_events(tickers, days[0], days[-1])
     nq, nq_ok = from_nasdaq(tickers, days)
-    decided = (me_ok or nq_ok) and (nq_ok or not config.EARNINGS_REQUIRE_NASDAQ)
+    if config.EARNINGS_REQUIRE_NASDAQ:
+        covered = market_events_coverage(tickers, scan_date) if (me_ok and not nq_ok) else set()
+        decided = lambda t: nq_ok or t in covered
+    else:
+        decided = lambda t: me_ok or nq_ok
     log.info("earnings: %s %s..%s, market_events %s, Nasdaq %s", len(tickers), days[0], days[-1],
              "ok" if me_ok else "unavailable", "ok" if nq_ok else "failed", extra={"milestone": True, "step": "source"})
     out = {}
@@ -132,7 +157,7 @@ def blocks(tickers: list[str], scan_date: dt.date, next_sessions: list[dt.date])
                        if d in days and (d != scan_date or when in AFTER_CLOSE)})
         if hits:
             out[t] = reason_hit(hits[0])
-        elif not decided:
+        elif not decided(t):
             out[t] = reason_unknown()
             log.warning("earnings: no calendar answered for %s - excluded (fail closed)", t)
         else:

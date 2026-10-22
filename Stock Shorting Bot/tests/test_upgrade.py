@@ -242,7 +242,7 @@ def test_fallback_skips_when_the_close_job_already_ran(fake, fdb, scan_inputs, n
 
 
 @pytest.mark.parametrize("state", ["started_guard", "lock_held"])
-def test_no_double_cover_while_the_1540_job_is_mid_run(fake, fdb, scan_inputs, nowait, state):
+def test_no_double_cover_while_the_1540_job_is_mid_run(fake, fdb, scan_inputs, nowait, state, monkeypatch):
     closing_in(fake, 10)
     fake.short("OLD", 10, 20.0)
     if state == "started_guard":
@@ -250,6 +250,8 @@ def test_no_double_cover_while_the_1540_job_is_mid_run(fake, fdb, scan_inputs, n
     else:                                                               # 15:40 job waiting for 15:55
         with open(os.path.join(config.LOG_DIR, "close.lock"), "w") as fh:
             fh.write(str(os.getppid()))
+        # while the fallback polls the lock, the 15:40 job reaches 15:55 and writes its guard
+        monkeypatch.setattr(daily.time, "sleep", lambda s: daily.write_guard(today(), [], status="started"))
     assert run_daily("--execute", "--fallback") == 0
     assert fake.orders == [] and "job_locked" not in kinds(fdb)
 
@@ -347,8 +349,13 @@ NEXT = [dt.date(2026, 10, 23), dt.date(2026, 10, 26)]
 
 
 def test_earnings_from_market_events(monkeypatch):
+    """Nasdaq down: a market_events hit still excludes; a name market_events doesn't cover is
+    excluded too (EARNINGS_REQUIRE_NASDAQ, review M3); with the flag off, the older rule."""
     monkeypatch.setattr(earnings, "from_market_events", lambda t, a, b: ({"AAA": [(dt.date(2026, 10, 26), "BMO")]}, True))
     monkeypatch.setattr(earnings, "from_nasdaq", lambda t, d: ({}, False))
+    got = earnings.blocks(["AAA", "BBB"], SCAN, NEXT)
+    assert got["AAA"] == "earnings within 2 sessions (2026-10-26)" and "fail closed" in got["BBB"]
+    monkeypatch.setattr(config, "EARNINGS_REQUIRE_NASDAQ", False)
     assert earnings.blocks(["AAA", "BBB"], SCAN, NEXT) == {"AAA": "earnings within 2 sessions (2026-10-26)", "BBB": None}
 
 
