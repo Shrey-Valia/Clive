@@ -60,9 +60,16 @@ def select(ranked: list[dict], equity: float) -> list[dict]:
     return picks
 
 
-def plan_cover(held: dict[str, int]) -> list[dict]:
+def cover_qty(q: float) -> float:
+    """Shares that buy back a short of q (< 0). Alpaca shorts are whole shares: math.ceil(abs(q)),
+    tolerant of float noise. A real fraction is covered exactly, never more than is short."""
+    n = math.ceil(abs(q) - 1e-6)
+    return n if n <= abs(q) + 1e-6 else round(abs(q), 9)
+
+
+def plan_cover(held: dict[str, float], purpose: str = "cover") -> list[dict]:
     """v2 15:55: buy back every short. Longs are left alone for whichever strategy owns them."""
-    return [{"ticker": t, "side": "buy", "qty": -q, "purpose": "cover"}
+    return [{"ticker": t, "side": "buy", "qty": cover_qty(q), "purpose": purpose}
             for t, q in sorted(held.items()) if q < 0]
 
 

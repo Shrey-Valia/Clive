@@ -82,7 +82,7 @@ def test_cover_rejected_but_flat_is_not_a_problem(fake, fdb, monkeypatch):
     fake.short("A", 10, 20.0)
     real_submit = fake.submit
 
-    def racy(ticker, qty, side):
+    def racy(ticker, qty, side, client_order_id=None):
         fake.pos.pop(ticker, None)
         raise RuntimeError("insufficient qty available for order")
     monkeypatch.setattr(daily.broker, "submit", racy)

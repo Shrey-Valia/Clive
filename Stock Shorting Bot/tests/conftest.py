@@ -40,6 +40,7 @@ class FakeBroker:
         self.cancelled = 0
         self.open_orders: list[dict] = []         # resting stops
         self.day_trades: int | None = 0           # what broker.day_trade_count() answers
+        self.client_ids: list[str | None] = []    # client_order_id of every submit / submit_stop
 
     # --- the broker API daily.py / monitor.py use
     def account(self):
@@ -87,11 +88,15 @@ class FakeBroker:
     def wait_no_open_orders(self, symbols, seconds=10):
         return True
 
+    def open_order_symbols(self, symbols):
+        return sorted({o["ticker"] for o in self.open_orders if o["ticker"] in symbols})
+
     def day_trade_count(self, sessions_back=5):
         return self.day_trades
 
-    def submit_stop(self, ticker, qty, stop_price):
+    def submit_stop(self, ticker, qty, stop_price, client_order_id=None):
         self.events.append(("stop", ticker, qty, stop_price))
+        self.client_ids.append(client_order_id)
         if ticker in self.reject:
             raise RuntimeError(self.reject[ticker])
         o = {"id": f"s{len(self.orders) + 1}", "ticker": ticker, "side": "buy", "qty": float(qty),
@@ -111,8 +116,9 @@ class FakeBroker:
         if p["qty"] == 0:
             del self.pos[ticker]
 
-    def submit(self, ticker, qty, side):
+    def submit(self, ticker, qty, side, client_order_id=None):
         self.events.append(("submit", side, ticker, qty))
+        self.client_ids.append(client_order_id)
         if ticker in self.reject:
             raise RuntimeError(self.reject[ticker])
         px = self.prices.get(ticker) or self.pos.get(ticker, {}).get("price") or 10.0
@@ -191,6 +197,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(alerts, "STATE", str(tmp_path / "alerts_state.json"))
     monkeypatch.setattr(daily.time, "sleep", lambda s: None)
     monkeypatch.setattr(daily, "code_version", lambda: "test")
+    monkeypatch.setattr(daily, "ORDER_ID_SUFFIX", "")
 
     def no_network(*a, **k):
         raise AssertionError("network call in an offline test")
@@ -218,7 +225,7 @@ def fake(monkeypatch):
     fb = FakeBroker()
     for name in ("account", "positions", "signed_holdings", "borrow", "adv20", "last_prices",
                  "session_today", "next_session", "cancel_open_orders", "submit", "refresh", "wait_filled",
-                 "wait_no_open_orders", "day_trade_count", "submit_stop"):
+                 "wait_no_open_orders", "open_order_symbols", "day_trade_count", "submit_stop"):
         monkeypatch.setattr(broker, name, getattr(fb, name))
     return fb
 

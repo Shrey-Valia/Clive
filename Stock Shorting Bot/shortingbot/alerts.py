@@ -34,8 +34,9 @@ def _load() -> dict:
 def _save(state: dict) -> None:
     try:
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
-        with open(STATE, "w") as fh:
+        with open(STATE + ".tmp", "w") as fh:          # tmp + rename: never half a file
             json.dump(state, fh, indent=1)
+        os.replace(STATE + ".tmp", STATE)
     except OSError as e:
         log.warning("alerts: could not save state: %s", e)
 

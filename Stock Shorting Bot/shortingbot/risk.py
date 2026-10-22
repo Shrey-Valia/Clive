@@ -28,9 +28,12 @@ def _read(name: str) -> dict | None:
 
 
 def _write(name: str, data: dict) -> None:
+    """tmp + rename, so a crash mid-write never leaves half a file."""
     try:
-        with open(_path(name), "w") as fh:
+        tmp = _path(name) + ".tmp"
+        with open(tmp, "w") as fh:
             json.dump(data, fh)
+        os.replace(tmp, _path(name))
     except OSError as e:
         log.warning("could not write %s: %s", name, e)
 

@@ -7,6 +7,7 @@
     python3 daily.py --open --execute   cron 09:31 ET: short the saved picks at market
     python3 daily.py --now              skip the waits (testing)
     python3 daily.py --force            allow a second executed run of the same job on the same day
+    python3 daily.py --execute --half-day-only   cron 12:40 ET: the 15:40 job, but only on a half day
 
 v2 schedule (short_intraday), research/PROPOSAL.md
   T   15:45  TradingView top gainers -> short data, borrow, ADV20, headlines -> score -> gates
@@ -22,6 +23,7 @@ and hold overnight. It is off; see the README to switch back.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import logging
@@ -41,6 +43,7 @@ GUARD = os.path.join(config.LOG_DIR, "last_execute.json")       # 15:40 job
 OPEN_GUARD = os.path.join(config.LOG_DIR, "last_open.json")     # 09:31 job
 DRY_PICKS_FILE = config.PICKS_FILE.replace(".json", ".dry_run.json")
 MILESTONE = {"milestone": True}
+ORDER_ID_SUFFIX = ""        # --force sets one, so a deliberate re-run doesn't collide with today's ids
 
 
 def setup_logging() -> None:
@@ -66,6 +69,97 @@ def wait_until(when: dt.datetime, label: str) -> None:
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def retry(fn, label: str, tries: int = 3, wait: float = 5):
+    """fn() up to `tries` times, `wait` seconds apart. The last error is raised."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if i == tries - 1:
+                raise
+            log.warning("%s failed (%s) - retry %d/%d in %gs", label, e, i + 1, tries - 1, wait)
+            time.sleep(wait)
+
+
+def session_or_fallback():
+    """Today's (open, close), None on a holiday. The calendar is retried; if it still fails on
+    a weekday a regular 09:30-16:00 session is assumed, so the 15:55 cover still happens."""
+    try:
+        return retry(broker.session_today, "exchange calendar")
+    except Exception as e:
+        now = dt.datetime.now(broker.ET)
+        if now.weekday() >= 5:
+            raise
+        alerts.raise_alert("calendar_failed", f"exchange calendar unavailable ({e}) - assuming a 16:00 close")
+        at = lambda h, m: now.replace(hour=h, minute=m, second=0, microsecond=0)
+        return at(9, 30), at(16, 0)
+
+
+def order_id(purpose: str, ticker: str, attempt: int = 0) -> str:
+    """Deterministic client_order_id: a POST alpaca-py retries is rejected as a duplicate
+    instead of filling twice (broker._send looks the first one up)."""
+    return f"v2-{purpose}-{dt.datetime.now(broker.ET).date()}-{ticker}-{attempt}{ORDER_ID_SUFFIX}"
+
+
+# ---------------------------------------------------------------- job locks
+class LockBusy(RuntimeError):
+    pass
+
+
+_held_locks: set[str] = set()
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return False                              # ours, but not held: left by a recycled pid
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def job_lock(name: str):
+    """logs/<name>.lock, created O_EXCL with our pid, removed on the way out. A lock whose pid is
+    dead is cleared. Re-entrant in one process: the 15:40 job holds "close" and its cover_all
+    takes it again; monitor.py's flatten takes the same lock, so the two can't cover at once."""
+    if name in _held_locks:
+        yield
+        return
+    path = os.path.join(config.LOG_DIR, f"{name}.lock")
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                raw = open(path).read().strip()
+                age = time.time() - os.path.getmtime(path)
+            except OSError:
+                continue                          # gone meanwhile: try again
+            pid = int(raw) if raw.isdigit() else None
+            if (pid and _pid_alive(pid)) or (pid is None and age < 60):   # no pid yet: being written
+                raise LockBusy(f"{name} lock held by pid {pid or '?'} ({os.path.basename(path)})")
+            log.warning("clearing stale %s lock (pid %s is not running)", name, pid)
+            with contextlib.suppress(OSError):
+                os.remove(path)
+            continue
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(os.getpid()))
+        break
+    else:
+        raise LockBusy(f"could not take the {name} lock")
+    _held_locks.add(name)
+    try:
+        yield
+    finally:
+        _held_locks.discard(name)
+        with contextlib.suppress(OSError):
+            os.remove(path)
 
 
 def code_version() -> str | None:
@@ -173,9 +267,17 @@ def guard_blocks(today: str, path: str | None = None) -> bool:
         return False
 
 
-def write_guard(today: str, sent: list[dict], path: str | None = None) -> None:
-    with open(path or GUARD, "w") as fh:
-        json.dump({"date": today, "orders": [s.get("id") for s in sent]}, fh)
+def write_guard(today: str, sent: list[dict], path: str | None = None, status: str | None = None) -> None:
+    """status="started" goes down before any order is sent, so a run that dies mid-way still
+    blocks a second run (use --force)."""
+    path = path or GUARD
+    data = {"date": today, "orders": [s.get("id") for s in sent]}
+    if status:
+        data["status"] = status
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
 
 
 def load_picks(path: str) -> dict | None:
@@ -216,9 +318,10 @@ def is_pdt_error(e) -> bool:
 
 
 # ---------------------------------------------------------------- order sending
-def send_orders(orders: list[dict], wait: int | None = None) -> tuple[list[dict], str | None]:
+def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0) -> tuple[list[dict], str | None]:
     """Send market orders one by one. A rejected order is recorded and the rest go on, except
-    after a PDT rejection, which stops the batch. Returns (sent, pdt_message)."""
+    after a PDT rejection, which stops the batch. Returns (sent, pdt_message). `attempt` goes
+    into each client_order_id, so a later cover pass is a new order, not a duplicate."""
     sent, pdt = [], None
     for o in orders:
         if pdt:
@@ -226,8 +329,10 @@ def send_orders(orders: list[dict], wait: int | None = None) -> tuple[list[dict]
                          "status": "rejected", "purpose": o["purpose"], "error": "skipped after PDT rejection"})
             continue
         try:
-            sent.append({**broker.submit(o["ticker"], o["qty"], o["side"]), "purpose": o["purpose"]})
-            log.info("  %s %s %d (%s)", o["side"].upper(), o["ticker"], o["qty"], o["purpose"], extra=MILESTONE)
+            sent.append({**broker.submit(o["ticker"], o["qty"], o["side"],
+                                         client_order_id=order_id(o["purpose"], o["ticker"], attempt)),
+                         "purpose": o["purpose"]})
+            log.info("  %s %s %g (%s)", o["side"].upper(), o["ticker"], o["qty"], o["purpose"], extra=MILESTONE)
         except Exception as e:                     # one rejected order must not stop the others
             log.error("  order rejected %s %s: %s", o["side"], o["ticker"], e)
             sent.append({"id": None, "ticker": o["ticker"], "side": o["side"], "qty": o["qty"],
@@ -253,68 +358,119 @@ def send_orders(orders: list[dict], wait: int | None = None) -> tuple[list[dict]
 
 
 # ---------------------------------------------------------------- v2: short_intraday, 15:40 job
-def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None) -> dict:
+def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None,
+              purpose: str = "cover") -> dict:
     """Buy back every open short. Returns {"planned", "sent", "problems", "left"}.
 
-    Open orders on the shorted names (and on `also_cancel`, today's entries) go first, so a
-    protective stop can't fire against a cover. Holdings are then re-read: a stop that filled
-    before the cancel has already covered its name, and a cover rejected for a name that turns
-    out flat is not a problem.
+    Each pass cancels the open orders on the names (and on `also_cancel`, today's entries, the
+    first time), so a protective stop can't fire against a cover, waits until none is open,
+    re-reads holdings and sends a cover for exactly what is still short. A stop that filled
+    meanwhile has already covered its name. Shorts still open after a pass get up to
+    COVER_EXTRA_PASSES more before the cutoff. If holdings can't be re-read after cancelling,
+    nothing is sent: a stale quantity could buy past the short into a long.
     """
     db.set_step("cover")
-    held = broker.signed_holdings()
-    covers = strategy.plan_cover(held)
+    held = retry(broker.signed_holdings, "positions")
+    covers = strategy.plan_cover(held, purpose)
     log.info("cover: %d shorts open %s", len(covers),
              {c["ticker"]: -c["qty"] for c in covers} or "{}", extra=MILESTONE)
     out = {"planned": covers, "sent": [], "problems": [], "left": {}}
     if not execute:
         for c in covers:
-            log.info("  DRY RUN would BUY %s %d (cover)", c["ticker"], c["qty"])
+            log.info("  DRY RUN would BUY %s %g (cover)", c["ticker"], c["qty"])
         return out
-    symbols = sorted({c["ticker"] for c in covers} | set(also_cancel or []))
-    if symbols:
-        try:
-            n = broker.cancel_open_orders(symbols)
-            if n:
-                log.info("cancelled %d open orders (stops included) on %s", n, ", ".join(symbols), extra=MILESTONE)
-                if not broker.wait_no_open_orders(symbols):
-                    log.warning("some orders on %s still open after cancelling", ", ".join(symbols))
-                held = broker.signed_holdings()
-                covers = strategy.plan_cover(held)
+    with job_lock("close"):
+        symbols = sorted({c["ticker"] for c in covers} | set(also_cancel or []))
+        for attempt in range(1 + config.COVER_EXTRA_PASSES):
+            if attempt:
+                symbols = sorted(out["left"])
+                if dt.datetime.now(broker.ET) > cutoff:
+                    out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff after {attempt} cover passes")
+                    break
+                log.warning("cover pass %d: still short %s", attempt + 1, out["left"], extra=MILESTONE)
+            if not symbols:
+                break
+            covers, short_now = fresh_covers(symbols, purpose, covers)
+            if covers is None:
+                out["problems"].append("positions unreadable after cancelling orders - covers not sent")
+                out["left"] = out["left"] or {c["ticker"]: -c["qty"] for c in out["planned"]}
+                alerts.raise_alert("cover_blocked", f"positions could not be re-read after cancelling orders on "
+                                                    f"{', '.join(symbols)} - nothing sent", level="critical")
+                break
+            if attempt == 0:
                 out["planned"] = covers
-        except Exception as e:
-            log.warning("cancel open orders failed: %s", e)
-    if not covers:
-        return out
-    if dt.datetime.now(broker.ET) > cutoff:
-        out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff - covers not sent")
-        out["left"] = {c["ticker"]: -c["qty"] for c in covers}
-        return out
-    sent, pdt = send_orders(covers, wait=config.FILL_WAIT_SECONDS)
-    out["sent"] = sent
-    record_orders(run_id, sent)
-    try:
-        out["left"] = {t: q for t, q in broker.signed_holdings().items() if q < 0}
-    except Exception as e:
-        log.warning("could not re-read positions after covering: %s", e)
-        out["left"] = {s["ticker"]: -s["qty"] for s in sent if s.get("status") != "filled"}
-    if pdt and out["left"]:
-        alerts.raise_alert("pdt_block", pdt + " - the short stays open overnight", level="critical")
-    for s in sent:
+            if not covers:                        # flat, or only names whose orders won't go away
+                out["left"] = short_now
+                if not short_now:
+                    break
+                continue
+            if dt.datetime.now(broker.ET) > cutoff:
+                out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff - covers not sent")
+                out["left"] = {c["ticker"]: -c["qty"] for c in covers}
+                break
+            sent, pdt = send_orders(covers, wait=config.FILL_WAIT_SECONDS, attempt=attempt)
+            out["sent"] += sent
+            record_orders(run_id, sent)
+            try:
+                out["left"] = {t: q for t, q in retry(broker.signed_holdings, "positions").items() if q < 0}
+            except Exception as e:
+                log.warning("could not re-read positions after covering: %s", e)
+                out["left"] = {s["ticker"]: -s["qty"] for s in sent if s.get("status") != "filled"}
+            if pdt:
+                if out["left"]:
+                    alerts.raise_alert("pdt_block", pdt + " - the short stays open overnight", level="critical")
+                break
+            if not out["left"]:
+                break
+    for s in out["sent"]:
         if s.get("status") == "filled":
             continue
         if s["ticker"] in out["left"]:
             out["problems"].append(f"cover {s['ticker']} {s.get('status')}: {s.get('error') or ''}".strip())
         else:
-            log.info("cover %s %s but the position is flat (stop filled first?)", s["ticker"], s.get("status"))
+            log.info("cover %s %s but the position is flat now (stop filled first?)", s["ticker"], s.get("status"))
     return out
+
+
+def fresh_covers(symbols: list[str], purpose: str, planned: list[dict]) -> tuple[list[dict] | None, dict]:
+    """One cover pass's plan: cancel open orders on `symbols`, wait for them to go, re-read
+    holdings, plan covers for those names only. Returns (covers, {ticker: qty} still short).
+    A name whose order would not go away is skipped this pass. covers None = holdings
+    unreadable after orders existed (or the cancel failed): send nothing. Unreadable with no
+    orders found falls back to `planned`."""
+    found, cancel_failed, still_open = 0, False, set()
+    try:
+        found = broker.cancel_open_orders(symbols)
+        if found:
+            log.info("cancelled %d open orders (stops included) on %s", found, ", ".join(symbols), extra=MILESTONE)
+    except Exception as e:
+        cancel_failed = True
+        log.warning("cancel open orders failed: %s", e)
+    try:
+        if not broker.wait_no_open_orders(symbols):
+            still_open = set(broker.open_order_symbols(symbols))
+    except Exception as e:
+        log.warning("could not check open orders: %s", e)
+        still_open = set(symbols) if (found or cancel_failed) else set()
+    if still_open:
+        log.warning("orders on %s still open after cancelling - no cover for them this pass", ", ".join(sorted(still_open)))
+    try:
+        held = retry(broker.signed_holdings, "positions after cancel")
+    except Exception as e:
+        log.error("could not re-read positions after cancelling: %s", e)
+        if found or cancel_failed:
+            return None, {}
+        planned = [c for c in planned if c["ticker"] in symbols]
+        return [c for c in planned if c["ticker"] not in still_open], {c["ticker"]: -c["qty"] for c in planned}
+    short_now = {t: q for t, q in held.items() if t in symbols and q < 0}
+    return [c for c in strategy.plan_cover(short_now, purpose) if c["ticker"] not in still_open], short_now
 
 
 def close_intraday(a, today: str, mode: str) -> int:
     run_id, prev_run_id, cover, scan_box = None, None, None, {}
     try:
         db.set_step("setup")
-        session = broker.session_today()
+        session = session_or_fallback()
         if session is None and (a.execute or not a.now):
             log.info("market closed today - nothing to do", extra=MILESTONE)
             db.insert("short_runs", {"run_date": today, "mode": mode, "status": "market_closed",
@@ -391,6 +547,8 @@ def close_intraday(a, today: str, mode: str) -> int:
                 t_scan.join(timeout=max(0.0, min(5.0, (trade_at - dt.datetime.now(broker.ET)).total_seconds())))
             wait_until(trade_at, "cover")
         entered = [e["ticker"] for e in (prev or {}).get("entered") or []] if prev_run_id else []
+        if a.execute:
+            write_guard(today, [], status="started")
         cover = cover_all(prev_run_id or run_id, a.execute, cutoff if not a.now else close, entered)
         if a.execute:
             write_guard(today, cover["sent"])
@@ -480,7 +638,8 @@ def place_stops(run_id, sent: list[dict], entries: list[dict]) -> list[dict]:
             continue
         level = strategy.stop_price(s.get("filled_avg_price") or planned[s["ticker"]], config.BROKER_STOP_PCT)
         try:
-            o = {**broker.submit_stop(s["ticker"], qty, level), "purpose": "stop"}
+            o = {**broker.submit_stop(s["ticker"], qty, level, client_order_id=order_id("stop", s["ticker"])),
+                 "purpose": "stop"}
             log.info("  STOP BUY %s %d @ $%.2f (+%g%%)", s["ticker"], qty, level, config.BROKER_STOP_PCT, extra=MILESTONE)
         except Exception as e:
             alerts.raise_alert("stop_failed", f"stop for {s['ticker']} at ${level:.2f} rejected: {e}", ticker=s["ticker"])
@@ -496,7 +655,12 @@ def halt_and_flatten(today: str, reason: str, run_id, session) -> str:
     risk.set_halt(today, reason)
     alerts.raise_alert("daily_loss_halt", f"{today}: {reason} - flattening, no new entries today", level="critical")
     close = session[1] if session else dt.datetime.now(broker.ET) + dt.timedelta(hours=1)
-    out = cover_all(run_id, True, close - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE))
+    try:
+        out = cover_all(run_id, True, close - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE),
+                        purpose="flatten")
+    except LockBusy as e:
+        alerts.raise_alert("cover_failed", f"halt flatten not run: {e} (another job is covering)", level="critical")
+        return reason
     if out["left"]:
         alerts.raise_alert("cover_failed", f"halt flatten left shorts open: {out['left']}", level="critical")
     return reason
@@ -625,6 +789,7 @@ def open_intraday(a, today: str, mode: str) -> int:
             db.events.flush_to(run_id)
             return 0
 
+        write_guard(today, [], OPEN_GUARD, status="started")
         sent, pdt = send_orders(entries, wait=config.FILL_WAIT_SECONDS if config.BROKER_STOP_PCT else None)
         record_orders(run_id, sent)
         write_guard(today, sent, OPEN_GUARD)
@@ -777,6 +942,8 @@ def main(argv=None) -> int:
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--open", action="store_true", help="the 09:31 next-open entry job")
     ap.add_argument("--picks", help="picks file for --open (default: logs/next_open_picks.json)")
+    ap.add_argument("--half-day-only", action="store_true",
+                    help="exit at once unless today's session closes before 16:00 (the 12:40 cron line)")
     a = ap.parse_args(argv)
 
     setup_logging()
@@ -784,6 +951,18 @@ def main(argv=None) -> int:
     mode = "execute" if a.execute else "dry_run"
     today = dt.datetime.now(broker.ET).date().isoformat()
     job = "open" if a.open else "close"
+    global ORDER_ID_SUFFIX
+    ORDER_ID_SUFFIX = f"-f{dt.datetime.now(broker.ET):%H%M%S}" if a.force else ""
+    if a.half_day_only:
+        try:
+            session = session_or_fallback()
+        except Exception as e:
+            log.info("--half-day-only: calendar unavailable (%s) - nothing to do", e)
+            return 0
+        if session is None or session[1].hour >= 16:
+            log.info("--half-day-only: %s - nothing to do",
+                     "market closed today" if session is None else f"regular close {session[1]:%H:%M} ET")
+            return 0
     log.info("=== daily %s run %s | %s | %s ===", job, today, mode, ", ".join(config.STRATEGIES))
 
     jobs = OPEN_JOBS if a.open else CLOSE_JOBS
@@ -791,14 +970,21 @@ def main(argv=None) -> int:
         log.error("config.STRATEGIES has both short_intraday and short_overnight - pick one")
         return 1
     rc = 0
-    for name in config.STRATEGIES:
-        fn = jobs.get(name)
-        if fn is None:
-            if name not in CLOSE_JOBS and name not in OPEN_JOBS:
-                log.error("unknown strategy %r in config.STRATEGIES", name)
-                rc = max(rc, 1)
-            continue
-        rc = max(rc, fn(a, today, mode))
+    try:
+        # one executed run of a job at a time; the close lock also keeps monitor.py's flatten out
+        with job_lock(job) if a.execute else contextlib.nullcontext():
+            for name in config.STRATEGIES:
+                fn = jobs.get(name)
+                if fn is None:
+                    if name not in CLOSE_JOBS and name not in OPEN_JOBS:
+                        log.error("unknown strategy %r in config.STRATEGIES", name)
+                        rc = max(rc, 1)
+                    continue
+                rc = max(rc, fn(a, today, mode))
+    except LockBusy as e:
+        log.error("%s - another %s run is going, not starting", e, job)
+        alerts.raise_alert("job_locked", f"{today} {job} job not run: {e}", level="critical")
+        return 1
     return rc
 
 

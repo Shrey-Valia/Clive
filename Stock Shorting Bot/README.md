@@ -11,7 +11,7 @@ The bot shorts end-of-day fades among the top 20 US gainers on the Alpaca **pape
 | 15:55 | Cover **every** open short. The scan runs in a thread, so the cover still happens if the scan fails or hangs. No new shorts are opened. |
 | 16:15 | cron runs `sync.py`: equity, positions and closed trades from Alpaca fills go to Supabase, plus a `sync_runs` row. |
 
-On half days the 15:45 and 15:55 steps move to 12:45 and 12:55, because they are taken from the calendar's close. No order is sent less than 2 minutes before the close. The 09:31 job refuses to enter after 09:50, in case the Mac woke up late. On a holiday the 15:40 job writes a `short_runs` row with `status='market_closed'`.
+On half days the 15:45 and 15:55 steps move to 12:45 and 12:55, because they are taken from the calendar's close. The 15:40 cron line would start too late for that, so a 12:40 line runs `daily.py --execute --half-day-only`, which exits at once unless today closes before 16:00. No order is sent less than 2 minutes before the close. The 09:31 job refuses to enter after 09:50, in case the Mac woke up late. On a holiday the 15:40 job writes a `short_runs` row with `status='market_closed'`.
 
 ## The checklist (`shortingbot/scoring.py`)
 
@@ -41,6 +41,7 @@ python3 daily.py --now    # dry run: ranked 20, the covers it would send, the pi
 python3 daily.py                      # dry run of the 15:40 job, waits for 15:45
 python3 daily.py --now                # same, immediately. Picks go to logs/next_open_picks.dry_run.json
 python3 daily.py --execute            # the 15:40 job (what cron does)
+python3 daily.py --execute --half-day-only   # the 12:40 job: the same, but only on a half day
 python3 daily.py --open --now         # dry run of the 09:31 job (reads the dry-run picks file if there is one)
 python3 daily.py --open --execute     # the 09:31 job (what cron does)
 python3 daily.py --open --now --picks FILE   # dry run against any picks file
@@ -49,18 +50,24 @@ python3 sync.py                       # pull Alpaca truth into Supabase
 python3 -m pytest -q tests            # offline test suite (fake broker, no network)
 ```
 
-Each executed job runs once a day. A second run is refused unless you pass `--force`. The guard files are `logs/last_execute.json` (15:40) and `logs/last_open.json` (09:31).
+Each executed job runs once a day. A second run is refused unless you pass `--force`. The guard files are `logs/last_execute.json` (15:40) and `logs/last_open.json` (09:31). A guard with `"status": "started"` is written before the first order goes out, so a run that died mid-way also blocks a second one.
+
+Only one executed run of a job at a time: `logs/close.lock` (the 15:40 job, and any cover, including `monitor.py`'s daily-loss flatten) and `logs/open.lock` (09:31) hold the running pid. A lock whose pid is gone is cleared automatically. A run that finds a live lock exits and raises a `job_locked` alert; a monitor flatten that finds it raises `cover_failed` and leaves the cover to the 15:55 job.
+
+The 15:55 cover makes up to three passes before the 15:58 cutoff (`COVER_EXTRA_PASSES = 2`). Each pass cancels the open orders on the names still short, waits for them to go, re-reads positions, and buys back exactly what is still short. Every order carries a `client_order_id` like `v2-cover-2026-10-22-ASST-0`, so a POST that alpaca-py retries can't fill twice. Every Alpaca HTTP call times out after 15 seconds. If the exchange calendar can't be read at 15:40 (three tries, 5 s apart) on a weekday, a 16:00 close is assumed.
 
 ## Scheduling
 
 ```cron
 31 9 * * 1-5 cd '/Users/shreyvalia/Desktop/Clive-Trading Bot/Stock Shorting Bot' && /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 daily.py --open --execute >> logs/cron.log 2>&1
 */15 9-15 * * 1-5 cd '/Users/shreyvalia/Desktop/Clive-Trading Bot/Stock Shorting Bot' && /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 monitor.py >> logs/cron.log 2>&1
+40 12 * * 1-5 cd '/Users/shreyvalia/Desktop/Clive-Trading Bot/Stock Shorting Bot' && /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 daily.py --execute --half-day-only >> logs/cron.log 2>&1
 40 15 * * 1-5 cd '/Users/shreyvalia/Desktop/Clive-Trading Bot/Stock Shorting Bot' && /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 daily.py --execute >> logs/cron.log 2>&1
 15 16 * * 1-5 cd '/Users/shreyvalia/Desktop/Clive-Trading Bot/Stock Shorting Bot' && /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 sync.py >> logs/cron.log 2>&1
 ```
 
 - `monitor.py` fires every 15 minutes from 09:00 to 15:45. It exits at once outside 09:45–15:45 ET or on a closed day, and on half days it stops 15 minutes before the close.
+- The 12:40 line does nothing on a regular day. On a half day it runs the whole 15:40 job (scan 12:45, cover 12:55); the 15:40 line then finds the guard and exits with "already executed today".
 - The times above are ET only because this Mac's clock is ET. If the Mac's timezone changes, the cron times have to change too.
 - `/usr/sbin/cron` needs Full Disk Access, because the folder is on the Desktop.
 - The Mac has to be awake, plugged in, and **lid open** from 09:25 to 16:20 ET. A closed lid sleeps the Mac and no wake schedule survives it.

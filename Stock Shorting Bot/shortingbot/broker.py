@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import os
 import time
@@ -11,6 +12,7 @@ from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame
+import requests
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, StopOrderRequest
@@ -40,6 +42,12 @@ def load_env(path: str | None = None) -> None:
 _client: TradingClient | None = None
 
 
+def _with_timeout(c):
+    """alpaca-py sends with no timeout: a hung socket would stall a job past its cutoff."""
+    c._session.request = functools.partial(c._session.request, timeout=config.ALPACA_TIMEOUT_SECONDS)
+    return c
+
+
 def client() -> TradingClient:
     global _client
     if _client is None:
@@ -48,7 +56,7 @@ def client() -> TradingClient:
             raise BrokerError("APCA_API_KEY_ID / APCA_API_SECRET_KEY missing - copy .env.example to .env")
         if os.environ.get("APCA_PAPER", "true").lower() not in ("1", "true", "yes"):
             raise BrokerError("APCA_PAPER is off. This bot is paper-only.")
-        _client = TradingClient(key, secret, paper=True)
+        _client = _with_timeout(TradingClient(key, secret, paper=True))
     return _client
 
 
@@ -80,9 +88,18 @@ def positions() -> list[dict]:
     } for p in client().get_all_positions()]
 
 
-def signed_holdings() -> dict[str, int]:
-    """{ticker: qty}, negative for shorts."""
-    return {p["ticker"]: int(round(p["qty"])) for p in positions()}
+def signed_holdings() -> dict[str, float]:
+    """{ticker: qty}, negative for shorts. Whole shares as int. Alpaca shorts are whole shares;
+    a fractional qty is kept as it is (logged) so a cover never rounds it away or buys past it."""
+    out = {}
+    for p in positions():
+        q = p["qty"]
+        if abs(q - round(q)) < 1e-6:
+            out[p["ticker"]] = int(round(q))
+        else:
+            log.warning("fractional position %s %s", p["ticker"], q)
+            out[p["ticker"]] = q
+    return out
 
 
 def borrow(tickers: list[str]) -> dict[str, dict]:
@@ -131,28 +148,63 @@ def prev_session(before: dt.date) -> dt.date | None:
 
 
 def cancel_open_orders(symbols: list[str] | None = None) -> int:
-    """Cancel open orders, all of them or only those on `symbols`."""
+    """Cancel open orders, all of them or only those on `symbols`. Returns how many were open.
+    Each cancel is tried on its own: one that fails (a stop filling meanwhile) is logged and the
+    rest still go. The caller waits and re-reads holdings either way."""
     open_orders = client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
     if symbols is not None:
         open_orders = [o for o in open_orders if o.symbol in set(symbols)]
     for o in open_orders:
-        client().cancel_order_by_id(o.id)
+        try:
+            client().cancel_order_by_id(o.id)
+        except Exception as e:
+            log.warning("cancel %s order %s failed: %s", o.symbol, o.id, e)
     return len(open_orders)
 
 
-def submit(ticker: str, qty: int, side: str) -> dict:
-    o = client().submit_order(MarketOrderRequest(
+def open_order_symbols(symbols: list[str]) -> list[str]:
+    """Which of `symbols` still have an open order."""
+    return sorted({o.symbol for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+                   if o.symbol in set(symbols)})
+
+
+def is_duplicate_id_error(e) -> bool:
+    t = str(e).lower()
+    return "client_order_id" in t and ("unique" in t or "duplicate" in t or "exists" in t)
+
+
+def _send(req):
+    """submit_order with a client_order_id. alpaca-py re-POSTs on a 429/504; if the first POST
+    went through, the retry is rejected as a duplicate id. That, or a timeout, is looked up by
+    the id: an order found there was already sent and is returned instead of sending again."""
+    try:
+        return client().submit_order(req)
+    except Exception as e:
+        coid = getattr(req, "client_order_id", None)
+        if not coid or not (is_duplicate_id_error(e) or isinstance(e, requests.exceptions.RequestException)):
+            raise
+        try:
+            o = client().get_order_by_client_id(coid)
+        except Exception:
+            raise e
+        log.warning("order %s already at Alpaca (%s) - not sent again", coid, str(e)[:200])
+        return o
+
+
+def submit(ticker: str, qty: float, side: str, client_order_id: str | None = None) -> dict:
+    o = _send(MarketOrderRequest(
         symbol=ticker, qty=qty,
         side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=TimeInForce.DAY, client_order_id=client_order_id,
     ))
     return order_dict(o)
 
 
-def submit_stop(ticker: str, qty: int, stop_price: float) -> dict:
+def submit_stop(ticker: str, qty: int, stop_price: float, client_order_id: str | None = None) -> dict:
     """Protective DAY buy-stop for a short. DAY so it dies at the close even if never cancelled."""
-    o = client().submit_order(StopOrderRequest(
-        symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, stop_price=stop_price))
+    o = _send(StopOrderRequest(
+        symbol=ticker, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, stop_price=stop_price,
+        client_order_id=client_order_id))
     return order_dict(o)
 
 
@@ -240,7 +292,8 @@ def data_client() -> StockHistoricalDataClient:
     global _data
     if _data is None:
         client()                                  # same key checks
-        _data = StockHistoricalDataClient(os.environ["APCA_API_KEY_ID"], os.environ["APCA_API_SECRET_KEY"])
+        _data = _with_timeout(StockHistoricalDataClient(os.environ["APCA_API_KEY_ID"],
+                                                        os.environ["APCA_API_SECRET_KEY"]))
     return _data
 
 
