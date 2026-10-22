@@ -1,0 +1,256 @@
+<title>Clive Night Two</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+{{STYLE}}
+<style>
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); max-width: 1120px; }
+.kpis > div { background: var(--panel); padding: 12px 14px; display: flex; flex-direction: column-reverse; gap: 2px; }
+.kpis b { font: 600 18px var(--f-mono); color: var(--ink); }
+.kpis span { font: 600 10px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); }
+.part { border-top: 2px solid var(--amber); padding-top: 18px; display: flex; flex-direction: column; gap: 8px; max-width: 1120px; }
+.part h2 { font-size: 28px; }
+.pending { border: 1px dashed var(--amber-dim); padding: 16px 18px; max-width: 840px; display: flex; flex-direction: column; gap: 6px; }
+.pending b { color: var(--amber); font-family: var(--f-mono); }
+a { color: var(--amber); }
+.refs li { font-size: 14px; }
+</style>
+
+<div class="top"><span class="brand">CLIVE</span><span class="fn">NIGHT2 &lt;GO&gt;</span><span>OVERNIGHT REPORT · OCT 21–22, 2026</span><span>BRANCH overnight/terminal-options-research</span></div>
+<main>
+
+<section class="col">
+  <div class="eyebrow">Overnight report, night two</div>
+  <h1>Clive Night Two</h1>
+  <p class="lede">Overnight, the shorting bot was rebuilt around the strategy the backtest supports: short at the open, flat by the close. Its review findings were fixed. The dashboard gained a color-coded market-events calendar and a live options view. Eleven research and engineering agents tested everything else you asked about. Most of it, including penny stocks, 0DTE options, news triggers and new options filters, does not survive realistic costs on data the tuning never saw. One long side does: an overnight long on the bot's own picks. It is built, but switched off.</p>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Read this first</div>
+  <h2>What changed and what you need to decide</h2>
+  <div class="verdicts">
+    <div><span class="pill go">LIVE TODAY</span><b>Shorting bot v2</b><p>At 15:55 today it buys back the 5 shorts held from yesterday and opens nothing new. From tomorrow it shorts saved picks at 09:31 and covers at 15:55, at 10% per name and 50% gross at most, only names with a score of 70+, priced $10+, with $10M+ daily volume. It has 121 tests, and an independent review's findings are fixed.</p></div>
+    <div><span class="pill go">LIVE</span><b>Dashboard</b><p>A color-coded events calendar (FOMC, CPI, jobs, PCE, GDP, earnings, opex, holidays), the v2 run timeline, alerts, a run log and a live options section. clive-terminal.netlify.app</p></div>
+    <div><span class="pill watch">BUILT · OFF</span><b>Overnight long sleeve</b><p>Buys v2's own picks at 15:55 and sells at the next open, before the 09:31 short. In backtest the combination made 16.4% a year out of sample against 10.7% for v2 alone. The long leg on its own is weak. It waits on your go-ahead.</p></div>
+    <div><span class="pill watch">BUILT · OFF</span><b>SPY iron condor sleeve</b><p>Added to the options bot. At $10k it can't trade: one condor risks about $2,272, more than the 20% cap. Fund the account to about $11.4k or more, or loosen the cap.</p></div>
+    <div><span class="pill no">REJECTED</span><b>Penny stocks, 0DTE, new options filters</b><p>The penny long and short strategies, every 0DTE structure, and all five filters from the papers fail out of sample after costs.</p></div>
+  </div>
+</section>
+
+<section class="col">
+  <h3>Decisions for you</h3>
+  <ol class="steps">
+    <li><b>Turn on the overnight long sleeve or not.</b> The recommended size is 5% per name and 25% gross. Paper-trade it for at least 3 months before trusting it.</li>
+    <li><b>Shorting bot risk settings.</b> The institutional review recommends 5% per name and a broker-side stop. Today's default is your approved 10% with no stop. Both are one config change: <code>SIZE_PCT_PER_NAME</code> and <code>BROKER_STOP_PCT</code>.</li>
+    <li><b>Drop QQQ from the dip put spread.</b> After the engine fixes it weakened to Sharpe 0.37 with a −22.5% drawdown. SPY and IWM held up.</li>
+    <li><b>Fund the options account to about $11.4k</b> if you want the condor sleeve to trade at all.</li>
+    <li><b>Keep the Mac awake from 09:20 to 16:20 ET</b> (<code>sudo pmset repeat wakeorpoweron MTWRF 09:20:00</code>), or move both bots to a ~$5/month VPS.</li>
+    <li><b>Approve the macOS crontab permission prompt</b> if it's on screen, then add the half-day cron line from the shorting bot README. It isn't needed until Nov 27.</li>
+    <li><b>Regenerate the options Alpaca keys</b> that were pasted in chat.</li>
+  </ol>
+</section>
+
+<!-- ===================== SHORTING ===================== -->
+<div class="part"><div class="eyebrow">Part 1</div><h2>Shorting bot v2</h2></div>
+<section class="col">
+  <p>The 2016–2026 backtest showed the old rules lost money in 10 of 11 years and came close to wiping out the account on two squeezes (KOSS, TOP). Spike names drift up overnight and fade the next day, so v2 drops the overnight hold.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Time (ET)</th><th>Job</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td>09:31</td><td><code>daily.py --open --execute</code></td><td class="why">Re-checks yesterday's saved picks: still shortable and easy to borrow, at least $10, not gapped up more than 40%, not already held. Shorts each at market, 10% per name, 50% gross at most. Refuses to enter after 09:50.</td></tr>
+    <tr><td>every 15 min</td><td><code>monitor.py</code></td><td class="why">Alerts if a position is 25% against the bot or the book is down 5%. Alerts only; it never trades unless the optional daily-loss halt is on.</td></tr>
+    <tr><td>15:40</td><td><code>daily.py --execute</code></td><td class="why">Starts the scan at 15:45. At 15:55 it cancels open orders and buys back every short, with up to 2 extra passes before the 15:58 cutoff. Opens nothing new. Saves the picks for tomorrow's open.</td></tr>
+    <tr><td>16:15</td><td><code>sync.py</code></td><td class="why">Writes equity, positions and closed trades (each linked to its run) and a sync row to Supabase. A clean sync no longer hides a failed run.</td></tr>
+  </tbody>
+</table></div>
+<section class="col">
+  <h3>Safety work</h3>
+  <ul>
+    <li><b>Independent review.</b> Nothing blocked today's run. The fixes it asked for:
+      <ul>
+        <li>Retries on the calendar and positions reads.</li>
+        <li>Extra cover passes when a cover fails or partially fills.</li>
+        <li>Deterministic order IDs, so a timed-out order that gets retried can't buy twice and open a long.</li>
+        <li>15-second timeouts on every Alpaca call.</li>
+        <li>Cancel each order separately and re-read positions before covering. This closes two race conditions that could open a long.</li>
+        <li>Job locks, plus a "started" guard written before any order goes out.</li>
+        <li>Atomic state-file writes.</li>
+        <li>A half-day run for 13:00 closes.</li>
+      </ul>
+      121 tests now pass.</li>
+    <li><b>PDT rule.</b> FINRA retired the pattern day trader rule on 2026-06-04, and Alpaca replaced it with intraday margin. Your paper account reports no day-trade limits, so the cap is off and all 5 names can trade. If Alpaca ever rejects an order for PDT reasons, the bot turns the cap on automatically and alerts.</li>
+    <li><b>Optional controls, all off by default:</b> per-name size, a broker-side day stop, a daily-loss halt and a drawdown halt.</li>
+    <li><b>Cleanup:</b> the old first-bot launch agent (<code>com.shrey.shortbot</code>), which pointed at a deleted folder, is unloaded. The 15:30 caffeinate agent is kept.</li>
+  </ul>
+  <h3>What to expect</h3>
+  <p>With the score-70 gate, the last two scans would have produced no trades at all. Expect about 30 trades a year, as in the backtest: Sharpe 1.21 out of sample, about 10.7% a year, −8.3% max drawdown. That result was assembled after a 1,037-trial search, so treat it as a paper-trading hypothesis.</p>
+</section>
+
+<!-- ===================== LONG SIDE / PENNY ===================== -->
+<div class="part"><div class="eyebrow">Part 2</div><h2>Adding a long side, and penny stocks</h2></div>
+<section class="col">
+  <p>One agent reviewed about 60 papers on low-priced stocks. 53 of them were resolved through LibKey. Another backtested 58 long, short and combined strategies on $1–$10 names from 2016 to 2026, with price-tiered spreads, a borrow-availability model calibrated to today's Alpaca easy-to-borrow lists, delisting losses and settlement rules. Each was compared with v2.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Strategy</th><th class="n">IS Sharpe</th><th class="n">OOS Sharpe</th><th class="n">OOS CAGR</th><th class="n">OOS max DD</th><th>Verdict</th></tr></thead>
+  <tbody>
+    <tr><td><b>v2 short</b> (baseline)</td><td class="n">1.32</td><td class="n">1.21</td><td class="n">10.7%</td><td class="n neg">−8.3%</td><td><span class="pill go">LIVE</span></td></tr>
+    <tr><td><b>Flip: overnight long on v2 names + v2 short</b></td><td class="n">1.38</td><td class="n">1.25</td><td class="n pos">16.4%</td><td class="n neg">−11.1%</td><td><span class="pill watch">BUILT · OFF</span></td></tr>
+    <tr><td>Overnight long on v2 names, alone</td><td class="n">0.75</td><td class="n">0.66</td><td class="n">5.3%</td><td class="n neg">−7.5%</td><td><span class="pill watch">WEAK ALONE</span></td></tr>
+    <tr><td>"Night Owl" overnight long, $1–10</td><td class="n neg">−0.26 to 0.25</td><td class="n neg">−0.60 to 0.30</td><td class="n">—</td><td class="n neg">−32 to −39%</td><td><span class="pill no">REJECTED</span></td></tr>
+    <tr><td>Penny fade short, $5–10</td><td class="n">0.36</td><td class="n">0.79</td><td class="n">6.3%</td><td class="n neg">−7.0%</td><td><span class="pill no">OOS-ONLY, BORROW-DEPENDENT</span></td></tr>
+    <tr><td>Day-2 news continuation</td><td class="n neg">−0.4 to −1.5</td><td class="n neg">−0.7 to −1.1</td><td class="n">—</td><td class="n">—</td><td><span class="pill no">REJECTED</span></td></tr>
+    <tr><td>Buying big losers (reversal)</td><td class="n neg">about −4.2</td><td class="n neg">about −4.0</td><td class="n neg">about −85%</td><td class="n neg">−100%</td><td><span class="pill no">REJECTED</span></td></tr>
+    <tr><td>Opening-range breakout</td><td class="n neg">−0.60</td><td class="n neg">−0.78</td><td class="n neg">−25%</td><td class="n neg">−76%</td><td><span class="pill no">REJECTED</span></td></tr>
+    <tr><td>SPY</td><td class="n">1.00</td><td class="n">0.74</td><td class="n">12.0%</td><td class="n neg">−24.5%</td><td><span class="pill info">BENCHMARK</span></td></tr>
+  </tbody>
+  <caption>IS is 2016–21 and OOS is 2022–26, $100k account. The flip holds up at double costs (Sharpe 1.08) and up to about $1M of capacity. The long leg alone has a median trade of about 0, depends on a few big overnight gaps, and had a worst overnight gap of −71%.</caption>
+</table></div>
+<figure>
+  <img src="{{IMG_PENNY_DECOMP}}" alt="Overnight long and next-day short returns by price bucket compared with round-trip costs.">
+  <figcaption>The overnight-up, next-day-down pattern exists at every price level and is larger in penny stocks. But it shrank 60–100% from in-sample to out-of-sample, and it is always smaller than the round-trip spread: 2.1–2.3% at $1–3, 0.85% at $5–10, 0.31% at $10 and up.</figcaption>
+</figure>
+<section class="col">
+  <h3>What the papers say about penny stocks</h3>
+  <ul>
+    <li><b>The overnight-up, intraday-down split is documented</b> (Berkman et al.; Lou, Polk &amp; Skouras: past overnight winners earn +3.47% a month overnight and −3.02% a month intraday). But about 45% of the overnight gain disappears when it's measured from the opening midpoint rather than the opening print.</li>
+    <li><b>Lottery-like and crowd-herded penny stocks underperform</b> over the following weeks (Bali, Cakici &amp; Whitelaw; Barber et al. on Robinhood; Kumar).</li>
+    <li><b>Costs dominate.</b> About 65% of anomalies fail once microcaps are handled properly (Hou, Xue &amp; Zhang). The average anomaly nets about 4 bp a month (Chen &amp; Velikov).</li>
+    <li><b>Alpaca facts:</b> no OTC stocks. Only 22–34% of recent penny gainers are easy to borrow. Overnight shorts under $5 need 100% margin.</li>
+  </ul>
+</section>
+<!--LONGSIDE-->
+
+<!-- ===================== OPTIONS ===================== -->
+<div class="part"><div class="eyebrow">Part 3</div><h2>Options bot</h2></div>
+<section class="col">
+  <h3>Backtester engine: 12 bugs fixed</h3>
+  <p>Each bug has a regression test that fails on the old code (47 tests pass). The fixes:</p>
+  <ul>
+    <li>The credit-to-width guard on core spreads.</li>
+    <li>A kill switch measured against the spread's max loss.</li>
+    <li>A strict "sell calls only above cost basis" rule for the wheel.</li>
+    <li>Share P&amp;L added to the trade log.</li>
+    <li><code>roll_itm</code> and <code>signal_lag</code> options.</li>
+    <li>The Thursday monthly-expiry rule.</li>
+    <li>macOS fork safety, plus four smaller fixes.</li>
+  </ul>
+  <p>No finalist verdict changed. The dip spread on QQQ weakened (Sharpe 0.48 → 0.37, drawdown −22.5%), while IWM improved (1.13 → 1.50). With the wheel's share P&amp;L included, its profit factor is 3.82, not the 0.95 published before.</p>
+</section>
+<div class="scroll"><table>
+  <thead><tr><th>Finalist</th><th class="n">Published</th><th class="n">Fixed</th><th class="n">Fixed + 1-day signal lag</th></tr></thead>
+  <tbody>
+    <tr><td>Dip put spread SPY $10k</td><td class="n">10.9% / 1.08</td><td class="n">11.7% / 1.09</td><td class="n">6.6% / 0.63</td></tr>
+    <tr><td>Dip put spread QQQ $10k</td><td class="n">5.3% / 0.48</td><td class="n neg">4.6% / 0.37, DD −22.5%</td><td class="n neg">1.4% / 0.17</td></tr>
+    <tr><td>Dip put spread IWM $10k</td><td class="n">7.6% / 1.13</td><td class="n pos">11.0% / 1.50</td><td class="n">9.7% / 1.21</td></tr>
+    <tr><td>SPY iron condor held to expiry, $100k</td><td class="n">9.8% / 1.06</td><td class="n">9.6% / 1.05</td><td class="n">9.2% / 1.00</td></tr>
+    <tr><td>Wheel QQQ $100k</td><td class="n">17.5% / 1.11</td><td class="n">identical</td><td class="n">17.6% / 1.21</td></tr>
+    <tr><td>Covered call QQQ $100k</td><td class="n">18.6% / 1.22</td><td class="n">identical</td><td class="n">18.1% / 1.16</td></tr>
+  </tbody>
+  <caption>CAGR / Sharpe over the full period. The 1-day lag delays both entries and exits, so it is harsher than the earlier lag check.</caption>
+</table></div>
+<section class="col">
+  <h3>Five rules from the papers: none beats the finalists</h3>
+  <p>61 trials, with the best deflated Sharpe at 0.16.</p>
+  <ul>
+    <li><b>Volatility-premium gate:</b> noise. Its in-sample edge disappears with a one-day lag.</li>
+    <li><b>Expiry by VIX term structure:</b> harmful.</li>
+    <li><b>Condor DTE × delta sweep:</b> the in-sample pick (30 DTE) failed out of sample. 0.25Δ condors lost 47–53% at worst. The 60 DTE / 0.10Δ finalist stays.</li>
+    <li><b>News filters:</b> no value. Closing a position on a news flag hurt every time.</li>
+    <li><b>Hype-fade call spreads:</b> rejected. The "hype" label added nothing.</li>
+    <li><b>Worth watching:</b> exiting the dip spread at the next open instead of 15:55 improved both periods (OOS Sharpe 2.08 vs 1.88). It wasn't the in-sample pick, so run it as a shadow paper rule first.</li>
+  </ul>
+  <h3>0DTE: no structure is positive after realistic costs</h3>
+  <p>The test covered 290 configs on 1-minute SPY option bars across 234 sessions, including 22 FOMC, 32 CPI and 31 jobs-report days. Structures roughly break even before costs, and four legs of trading costs push them negative. The variance-premium filter reversed out of sample: +6.7% in-sample, −14.6% out of sample. FOMC days are "less bad" than ordinary days, not profitable. CPI-only flies (+3.4% out of sample, n = 15) are a hypothesis to paper-trade, not a result.</p>
+  <p>It also explains the earlier 1-day condor loss. On SPY alone the trade was +0.64% gross; QQQ and costs caused the −3.8%. All of SPY's gross edge (+2.06%, t 3.7) sits in the final 35 minutes before settlement, and Alpaca rejects orders on expiring SPY options after 15:30.</p>
+</section>
+<figure>
+  <img src="{{IMG_0DTE}}" alt="1DTE condor P&amp;L decomposed into overnight, intraday and final 35 minutes, plus put and call sides.">
+  <figcaption>The 1DTE condor's P&amp;L by window. The edge lives in the last 35 minutes, which Alpaca won't let us hold.</figcaption>
+</figure>
+<section class="col">
+  <h3>Iron condor sleeve added to the live bot (off)</h3>
+  <ul>
+    <li><b>Strategy:</b> the research finalist, a SPY condor with 0.10Δ shorts, 3% wings and about 60 DTE, closed the day before expiry and never into Alpaca's 15:30 expiration handling.</li>
+    <li><b>Separation from the dip spread:</b> the two sleeves share a 50% total max-loss budget. Each gets its own order-ID prefix, so their legs are never mixed up, and neither trades a symbol the other holds.</li>
+    <li><b>Tests:</b> 28 new tests, plus a regression test proving the dip spread's orders are identical with the condor off. 166 options tests pass.</li>
+    <li><b>Blocker at $10k:</b> one condor risks $2,272, more than the 20% cap. It needs about $11.4k or more of equity, or a looser cap.</li>
+  </ul>
+</section>
+
+<!-- ===================== INSTITUTIONAL ===================== -->
+<div class="part"><div class="eyebrow">Part 4</div><h2>What institutions know that the backtests miss</h2></div>
+<section class="col">
+  <p>One agent checked every strategy against AQR, Man, Robeco, Cboe, Fed, BIS and SEC research. 33 of 35 journal articles were resolved through LibKey. The full review is in <code>Research/institutional_review.md</code>, with access links.</p>
+  <ul>
+    <li><b>Both bots are the same bet.</b> Shorting spikes, put spreads, condors, covered calls and pairs all sell insurance or supply liquidity, so they lose together in a volatility spike or a squeeze. Nothing currently stops a KOSS-type day from landing at the same time as a volatility gap.</li>
+    <li><b>Squeezes don't need high short interest.</b> On Jan 27, 2021, KOSS rose 480% in one day, and 134 stocks had a one-day gain bigger than GameStop's largest. The short-interest filter is necessary but not sufficient.</li>
+    <li><b>VIX kill switches fire after the damage.</b> Feb 2018, Aug 2024 and Apr 2025 were gap events with V-shaped recoveries. That's why the kill switch only helped in the slow crises of 2008 and 2020.</li>
+    <li><b>Covered calls are mostly long equity.</b> About 10% of their risk is the volatility premium (Israelov &amp; Nielsen). Collars often do worse than simply holding less stock.</li>
+    <li><b>The v2 design fits the evidence.</b> Overnight-up, intraday-down is a documented effect (Lou, Polk &amp; Skouras).</li>
+  </ul>
+  <h3>Their recommended risk framework</h3>
+  <ul>
+    <li><b>Shorting bot sizing:</b> size by how much a squeeze would cost. 5% per name, a broker-side stop at +30–40%, at most 2 names per industry, no names with earnings within 2 days.</li>
+    <li><b>Options book:</b> assume every spread can hit max loss at once. Cap total options max loss at 10% of the account and 3% per expiry. Treat SPY, QQQ and IWM as one position.</li>
+    <li><b>Account-level halts:</b> −3% in a day means flatten and block. −10% drawdown means half size, and −15% means stop and review. Run a daily stress test across both bots.</li>
+    <li><b>Graduating from paper to live money:</b>
+      <ul>
+        <li>Short bot: at least 60 trades and 9 months.</li>
+        <li>Options bot: at least 40 spreads, including a period with VIX above 25.</li>
+        <li>Slippage at most 1.5x the backtest's assumption.</li>
+        <li>30 clean operating days in a row.</li>
+        <li>Then go live at 25% of target size, scaling up from there.</li>
+      </ul></li>
+  </ul>
+  <p class="dim">I applied the sizing ideas as optional switches and left your approved defaults in place. Whether to adopt them is your decision.</p>
+</section>
+
+<!-- ===================== DASHBOARD ===================== -->
+<div class="part"><div class="eyebrow">Part 5</div><h2>Dashboard and data</h2></div>
+<section class="col">
+  <ul>
+    <li><b>Events calendar:</b> 90 events from the Fed, Nasdaq, BEA, Census and Alpaca. FOMC dates and press conferences, Fed speeches, CPI, PPI, jobs reports, PCE, GDP, retail sales, jobless claims, earnings, ex-dividend dates, opex, quad witching, VIX expiry, holidays and half days. It refreshes daily at 07:00.
+      <ul>
+        <li>Each chip carries a text code (FOMC, CPI, ERN, OPX, HOL) as well as a color.</li>
+        <li>It shows up in a strip at the top of every page, as the Overview calendar, and on a new <code>/events</code> page (F5 or <code>EVT</code>).</li>
+        <li>Picks and positions with an event within 2 sessions get a flag.</li>
+        <li>Investor days and conference talks have no free data source; add them in <code>events/manual_events.csv</code>.</li>
+      </ul></li>
+    <li><b>v2-aware dashboard:</b> the timeline reads scan → 09:31 entry → 15:55 exit → sync, and it now shows run logs, sync status, alerts and long/short direction chips.</li>
+    <li><b>Live options paper section:</b> equity, open spreads with events up to expiry, runs, orders and trades.</li>
+    <li><b>Database:</b> migrations 004 (bot operations), 005 (market events) and 006 (options sleeves) are applied to the Clive Supabase project.</li>
+  </ul>
+</section>
+<figure>
+  <img src="{{IMG_EVENTS}}" alt="The /events page: color-coded week grid, agenda list and month calendar (demo data).">
+  <figcaption>The <code>/events</code> page, shown here with demo data. The live site uses the real event table.</figcaption>
+</figure>
+
+<!-- ===================== CAVEATS ===================== -->
+<section class="col">
+  <div class="eyebrow">Read before acting</div>
+  <h2>Caveats</h2>
+  <ul>
+    <li><b>Few trades, wide error bars.</b> Every surviving strategy has a deflated Sharpe below 0.95 once all the trials behind it are counted. The shorting and flip results were chosen after more than 1,000 trials.</li>
+    <li><b>No historical borrow data.</b> Backtests approximate it with price and volume filters, or with today's easy-to-borrow list. Real borrow on spike days was likely worse. The long sleeve now logs easy-to-borrow status daily so future tests can use real history.</li>
+    <li><b>Fills come from trade prints, not quotes.</b> Opening-print fills on small caps will be worse than modeled, and the open-versus-midpoint gap is the main risk to the overnight long.</li>
+    <li><b>Hardcoded dates.</b> Some 2026 BLS and NFP dates are hardcoded and not yet checked against bls.gov.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Where everything is</div>
+  <h2>Files</h2>
+  <ul>
+    <li><code>Stock Shorting Bot/</code>: v2 bot, <code>monitor.py</code>, tests, README with cron lines, research/PROPOSAL.md.</li>
+    <li><code>Penny Research/</code>: papers_penny.md (LibKey-resolved), results/, out/.</li>
+    <li><code>Options Bot/tuning/{engine_fixes,newrules,zero_dte}/</code>: three studies. <code>Options Bot/live/</code>: the condor sleeve.</li>
+    <li><code>Research/institutional_review.md</code>: the institutional review and risk framework.</li>
+    <li><code>events/</code>: the calendar job. <code>dashboard/</code>: the site, plus migrations 004–007.</li>
+    <li>Full research report (both bots plus pairs): <a href="https://claude.ai/artifact/J36vu8Fw3Ta4LSyH4z5QMY">Clive Research Report</a>.</li>
+  </ul>
+</section>
+</main>
+<footer><p>Hypothetical backtests and paper trading, not investment advice. Journal citations were resolved through LibKey with Northeastern access links where available, and SSRN/NBER working papers are marked as not LibKey-resolved in each source file. Everything is committed on the <code>overnight/terminal-options-research</code> branch. The long sleeve is on <code>longside-overnight</code> until it's merged.</p></footer>
