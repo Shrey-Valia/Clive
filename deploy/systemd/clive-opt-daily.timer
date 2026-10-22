@@ -1,0 +1,14 @@
+# Options 15:45 ET daily run, decides 15:55 (live/run.py --execute)
+[Unit]
+Description=Clive timer: Options 15:45 ET daily run, decides 15:55 (live/run.py --execute)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:45:00 America/New_York
+# A run missed while the VM was down must NOT replay late (a 09:31 entry at 11:00 is wrong).
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=clive-job@opt-daily.service
+
+[Install]
+WantedBy=timers.target

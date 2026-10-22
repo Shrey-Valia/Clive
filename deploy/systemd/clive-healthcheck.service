@@ -1,0 +1,13 @@
+[Unit]
+Description=Clive end-of-day check: did every expected run happen?
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=clive
+Group=clive
+Environment=TZ=America/New_York
+ExecStart=/opt/clive/app/deploy/healthcheck.sh --daily
+TimeoutStartSec=5min
+SyslogIdentifier=clive-healthcheck

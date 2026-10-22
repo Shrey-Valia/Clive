@@ -1,0 +1,8 @@
+# Installed on the VM together with "Stock Shorting Bot/requirements.txt" and
+# "Options Bot/requirements.txt" (bootstrap.sh --app). These are used directly by the bots
+# but only arrive transitively today (shortingbot imports nothing of pandas itself, but
+# yfinance does; the options bot's live/ code imports pandas/numpy).
+pandas
+numpy
+# zoneinfo falls back to this if the system tz database is ever missing.
+tzdata

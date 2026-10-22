@@ -1,0 +1,14 @@
+# Shorting monitor every 15 min 09:00-15:45 ET (cron */15 9-15)
+[Unit]
+Description=Clive timer: Shorting monitor every 15 min 09:00-15:45 ET (cron */15 9-15)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09..15:00/15:00 America/New_York
+# A run missed while the VM was down must NOT replay late (a 09:31 entry at 11:00 is wrong).
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=clive-job@short-monitor.service
+
+[Install]
+WantedBy=timers.target

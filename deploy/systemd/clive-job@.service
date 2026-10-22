@@ -1,0 +1,32 @@
+# One trading job. %i is the job name from deploy/bin/run-job.sh (short-open, opt-daily, ...).
+# Started only by its clive-<job>.timer (or by hand: sudo systemctl start clive-job@short-sync).
+[Unit]
+Description=Clive trading job %i
+Wants=network-online.target
+After=network-online.target time-sync.target
+# Any non-zero exit or timeout pushes an ntfy alert and writes a Supabase alerts row at once.
+OnFailure=clive-alert@%i.service
+
+[Service]
+Type=oneshot
+User=clive
+Group=clive
+WorkingDirectory=/opt/clive/app
+# The system clock stays UTC. TZ makes the bots' own log timestamps (and any naive
+# datetime.now()) Eastern, exactly as on the Mac. The schedule itself is in the timers.
+Environment=TZ=America/New_York
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/clive
+ExecStart=/opt/clive/app/deploy/bin/run-job.sh %i
+# Backstop only; run-job.sh applies a tighter per-job timeout (30-45 min).
+TimeoutStartSec=75min
+KillMode=control-group
+SyslogIdentifier=clive-%i
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+# Not enabled directly; timers start it.

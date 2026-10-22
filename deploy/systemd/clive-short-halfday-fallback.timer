@@ -1,0 +1,14 @@
+# Shorting 12:50 ET half-day fallback, README optional line (daily.py --execute --fallback --half-day-only)
+[Unit]
+Description=Clive timer: Shorting 12:50 ET half-day fallback, README optional line (daily.py --execute --fallback --half-day-only)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 12:50:00 America/New_York
+# A run missed while the VM was down must NOT replay late (a 09:31 entry at 11:00 is wrong).
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=clive-job@short-halfday-fallback.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Clive VM-alive heartbeat (dead-man ping + one daily ntfy)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=clive
+Group=clive
+Environment=TZ=America/New_York
+ExecStart=/opt/clive/app/deploy/healthcheck.sh --alive
+TimeoutStartSec=2min
+SyslogIdentifier=clive-alive

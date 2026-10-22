@@ -1,0 +1,27 @@
+# Pins = what the Mac runs today (python3.13 -m pip list, 2026-10-22), so the VM trades on the
+# same library versions. Bump deliberately, test with deploy/dryrun.sh, then sync.
+alpaca-py==0.21.0
+yfinance==0.2.65
+pandas==2.3.2
+numpy==2.2.6
+requests==2.31.0
+urllib3==2.5.0
+certifi==2025.8.3
+charset-normalizer==3.4.3
+idna==3.19
+pydantic==2.12.4
+pydantic_core==2.41.5
+msgpack==1.1.2
+websockets==15.0.1
+sseclient-py==1.9.0
+curl_cffi==0.13.0
+beautifulsoup4==4.13.5
+peewee==3.18.2
+platformdirs==4.4.0
+frozendict==2.4.6
+multitasking==0.0.12
+protobuf==6.32.0
+pytz==2024.1
+tzdata==2025.2
+python-dateutil==2.9.0
+pytest==9.0.3

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# clive-mode [off|shadow|live] -- show or set the VM's run mode (see run-job.sh).
+#   sudo clive-mode            show the mode and the next timer runs
+#   sudo clive-mode shadow     dry runs on the real schedule (Mac still trades)
+#   sudo clive-mode live       the VM trades. Refused until migrate_state.sh push has run.
+#   sudo clive-mode off        every job is a no-op (rollback)
+set -euo pipefail
+MODE_FILE=/etc/clive/mode
+MIGRATED=/var/lib/clive/state-migrated
+
+cur="off"; [[ -r $MODE_FILE ]] && cur="$(tr -d '[:space:]' < "$MODE_FILE")"
+want="${1:-}"
+
+if [[ -z "$want" ]]; then
+  echo "mode: $cur"
+  [[ -f $MIGRATED ]] && echo "state migrated from the Mac: $(cat "$MIGRATED")" || echo "state migrated from the Mac: no"
+  systemctl list-timers 'clive-*' --no-pager 2>/dev/null || true
+  exit 0
+fi
+
+[[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
+case "$want" in
+  off|shadow) ;;
+  live)
+    if [[ ! -f $MIGRATED && "${2:-}" != "--force" ]]; then
+      echo "Refusing: the bots' state has not been moved from the Mac yet." >&2
+      echo "Run deploy/migrate_state.sh push on the Mac first (README step 8)." >&2
+      exit 1
+    fi ;;
+  *) echo "usage: clive-mode [off|shadow|live]" >&2; exit 2 ;;
+esac
+
+if [[ "$want" == "shadow" && -f $MIGRATED ]]; then
+  echo "Note: state was already migrated; shadow mode will NOT trade, so nothing trades anywhere"
+  echo "unless the Mac crontab is back on. Use 'live' or 'off'."
+fi
+
+mkdir -p "$(dirname "$MODE_FILE")"
+echo "$want" > "$MODE_FILE.tmp" && mv "$MODE_FILE.tmp" "$MODE_FILE"
+chmod 644 "$MODE_FILE"
+logger -t clive-mode "mode $cur -> $want by ${SUDO_USER:-root}"
+echo "mode: $cur -> $want"

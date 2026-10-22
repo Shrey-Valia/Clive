@@ -1,0 +1,14 @@
+# Market events calendar, daily 07:00 ET incl. weekends (sync_events.py)
+[Unit]
+Description=Clive timer: Market events calendar, daily 07:00 ET incl. weekends (sync_events.py)
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 America/New_York
+# A run missed while the VM was down must NOT replay late (a 09:31 entry at 11:00 is wrong).
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=clive-job@events-sync.service
+
+[Install]
+WantedBy=timers.target

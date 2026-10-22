@@ -1,0 +1,12 @@
+# Fired by OnFailure= of clive-job@%i.service.
+[Unit]
+Description=Clive alert for failed job %i
+
+[Service]
+Type=oneshot
+User=clive
+Group=clive
+Environment=TZ=America/New_York
+ExecStart=/opt/clive/app/deploy/healthcheck.sh --failed %i
+TimeoutStartSec=2min
+SyslogIdentifier=clive-alert

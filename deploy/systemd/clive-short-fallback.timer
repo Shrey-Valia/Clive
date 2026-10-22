@@ -1,0 +1,14 @@
+# Shorting 15:50 ET fallback: covers at once if the 15:40 job never started (daily.py --execute --fallback)
+[Unit]
+Description=Clive timer: Shorting 15:50 ET fallback: covers at once if the 15:40 job never started (daily.py --execute --fallback)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:50:00 America/New_York
+# A run missed while the VM was down must NOT replay late (a 09:31 entry at 11:00 is wrong).
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=clive-job@short-fallback.service
+
+[Install]
+WantedBy=timers.target
