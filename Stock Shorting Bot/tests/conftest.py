@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import daily  # noqa: E402
-from shortingbot import alerts, broker, config, db, news, shortdata, tradingview  # noqa: E402
+from shortingbot import alerts, broker, config, db, earnings, news, shortdata, tradingview  # noqa: E402
 
 ET = broker.ET
 
@@ -43,6 +43,7 @@ class FakeBroker:
         self.client_ids: list[str | None] = []    # client_order_id of every submit / submit_stop / submit_long
         self.long_mode: dict[str, object] = {}    # ticker -> "rest" (no fill yet) or ("partial", n), next submit_long only
         self.quote_map: dict[str, dict] = {}      # overrides quotes(); default ask = last = prices[t]
+        self.sold_today_error: str | None = None  # sold_today() raises this
 
     # --- the broker API daily.py / monitor.py use
     def account(self):
@@ -78,6 +79,15 @@ class FakeBroker:
 
     def next_session(self, after):
         return self.next_day
+
+    def next_sessions(self, after, n=2):
+        return [self.next_day + dt.timedelta(days=i) for i in range(n)]
+
+    def sold_today(self):
+        """Symbols with a filled sell today (every fake order is today's)."""
+        if self.sold_today_error:
+            raise RuntimeError(self.sold_today_error)
+        return {o["ticker"] for o in self.orders if o["side"] == "sell" and o.get("filled_qty")}
 
     def cancel_open_orders(self, symbols=None):
         self.events.append(("cancel", tuple(symbols or ())))
@@ -250,7 +260,11 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(daily.time, "sleep", lambda s: None)
     monkeypatch.setattr(daily, "code_version", lambda: "test")
     monkeypatch.setattr(daily, "ORDER_ID_SUFFIX", "")
-    monkeypatch.setattr(config, "OVERNIGHT_LONG_ENABLED", False)   # a SHORTBOT_OVERNIGHT_LONG=1 shell can't leak in
+    monkeypatch.setattr(config, "OVERNIGHT_LONG_ENABLED", False)   # tests turn the sleeve on themselves
+    monkeypatch.setattr(config, "CACHE_DIR", str(tmp_path / ".cache"))
+    # earnings gate sources: answered, no earnings, unless a test says otherwise
+    monkeypatch.setattr(earnings, "from_market_events", lambda tickers, start, end: ({}, True))
+    monkeypatch.setattr(earnings, "from_nasdaq", lambda tickers, days: ({}, True))
 
     def no_network(*a, **k):
         raise AssertionError("network call in an offline test")
@@ -274,13 +288,27 @@ def _real_logs() -> dict:
     return out
 
 
+LEGACY_V2 = {"SIZE_PCT_PER_NAME": 10.0, "SIZE_PCT_MAX": 10.0, "SIZE_PCT_MIN": 10.0, "MAX_SQUEEZE_LOSS_PCT": None,
+             "BROKER_STOP_PCT": None, "COVER_LEFTOVERS_AT_OPEN": False, "MAX_PER_INDUSTRY": None,
+             "EARNINGS_GATE": False}
+
+
+@pytest.fixture
+def legacy_v2_config(monkeypatch):
+    """The v2 settings before the 2026-10-23 upgrade (10% a name, no stop, no squeeze cap, no
+    leftover cover at the open, no industry cap, no earnings gate). The suites written against
+    them pin them; tests/test_upgrade.py tests the new defaults."""
+    for k, v in LEGACY_V2.items():
+        monkeypatch.setattr(config, k, v)
+
+
 @pytest.fixture
 def fake(monkeypatch):
     fb = FakeBroker()
     for name in ("account", "positions", "signed_holdings", "borrow", "adv20", "last_prices",
                  "session_today", "next_session", "cancel_open_orders", "submit", "refresh", "wait_filled",
                  "wait_no_open_orders", "open_order_symbols", "day_trade_count", "submit_stop",
-                 "submit_long", "quotes", "open_prints"):
+                 "submit_long", "quotes", "open_prints", "next_sessions", "sold_today"):
         monkeypatch.setattr(broker, name, getattr(fb, name))
     return fb
 
@@ -296,7 +324,7 @@ def fdb(monkeypatch):
 
 def gainer(ticker, close=20.0, change=40.0, **kw):
     """A TradingView row that scores well above 70 with the default checklist."""
-    row = {"ticker": ticker, "company": ticker, "sector": "Tech", "open": close * 0.8, "high": close * 1.25,
+    row = {"ticker": ticker, "company": ticker, "sector": "Tech", "industry": f"Industry {ticker}", "open": close * 0.8, "high": close * 1.25,
            "low": close * 0.75, "close": close, "VWAP": close, "change": change, "market_cap": 5e8,
            "volume": 5e6, "rvol": 8.0, "avg_volume": 1e6, "float_shares_outstanding": 5e7,
            "prev_close": close / (1 + change / 100)}

@@ -9,6 +9,8 @@ import monitor
 import sync
 from shortingbot import alerts, config, db
 
+pytestmark = pytest.mark.usefixtures("legacy_v2_config")   # pre-2026-10-23 settings; see conftest
+
 
 class Resp:
     def __init__(self, code, body=None, text=""):

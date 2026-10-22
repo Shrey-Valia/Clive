@@ -2,10 +2,14 @@
 cancel. Before the fix the stale cover bought the short back a second time and left a long."""
 from __future__ import annotations
 
+import pytest
+
 import datetime as dt
 
 import daily
 from shortingbot import broker
+
+pytestmark = pytest.mark.usefixtures("legacy_v2_config")   # pre-2026-10-23 settings; see conftest
 
 
 def test_cancel_raises_then_no_stale_cover(fake, monkeypatch):

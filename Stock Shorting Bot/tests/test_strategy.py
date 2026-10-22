@@ -6,6 +6,8 @@ import pytest
 from conftest import qty_for
 from shortingbot import config, strategy
 
+pytestmark = pytest.mark.usefixtures("legacy_v2_config")   # pre-2026-10-23 settings; see conftest
+
 
 def row(t, score=80.0, close=20.0, adv=50e6, **kw):
     return {"ticker": t, "short_score": score, "close": close, "adv20_usd": adv, "exclude_reason": None, **kw}

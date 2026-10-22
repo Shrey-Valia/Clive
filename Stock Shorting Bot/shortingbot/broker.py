@@ -142,6 +142,20 @@ def next_session(after: dt.date) -> dt.date | None:
     return later[0] if later else None
 
 
+def next_sessions(after: dt.date, n: int = 2) -> list[dt.date]:
+    """The first n trading days after `after` (the earnings gate's window)."""
+    return [d for d, _, _ in sessions(after + dt.timedelta(days=1), after + dt.timedelta(days=14)) if d > after][:n]
+
+
+def sold_today() -> set[str]:
+    """Symbols with a (partly) filled sell order today, ET. Read-only. A short open now in one of
+    these was opened today; any other short is a leftover from an earlier session."""
+    start = dt.datetime.combine(dt.datetime.now(ET).date(), dt.time(), ET)
+    orders = client().get_orders(GetOrdersRequest(status=QueryOrderStatus.ALL, after=start,
+                                                  side=OrderSide.SELL, limit=500))
+    return {o.symbol for o in orders if float(o.filled_qty or 0) > 0}
+
+
 def prev_session(before: dt.date) -> dt.date | None:
     """The last trading day before `before`: when the picks being entered were scanned."""
     earlier = [d for d, _, _ in sessions(before - dt.timedelta(days=10), before - dt.timedelta(days=1)) if d < before]

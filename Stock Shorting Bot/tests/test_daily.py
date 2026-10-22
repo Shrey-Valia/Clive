@@ -13,6 +13,8 @@ from shortingbot import alerts, config, db
 
 HANDOVER = {"ASST": (51, 30.78), "AVX": (412, 4.41), "BNC": (317, 5.69), "NAKA": (201, 8.47), "RCEL": (96, 15.28)}
 
+pytestmark = pytest.mark.usefixtures("legacy_v2_config")   # pre-2026-10-23 settings; see conftest
+
 
 def today():
     return dt.datetime.now(ET).date().isoformat()

@@ -8,16 +8,23 @@
     python3 daily.py --now              skip the waits (testing)
     python3 daily.py --force            allow a second executed run of the same job on the same day
     python3 daily.py --execute --half-day-only   cron 12:40 ET: the 15:40 job, but only on a half day
+    python3 daily.py --execute --fallback        cron 15:50 ET: exit 0 if the 15:40 job started (guard or
+                                        close.lock); else cover all at once, scan, long-sleeve entry
+    python3 daily.py --cover-leftovers --execute cron 10:00/12:00/14:00 ET: cover every short not
+                                        opened today (a missed cover), any time in market hours
 
 v2 schedule (short_intraday), research/PROPOSAL.md
   T   15:45  TradingView top gainers -> short data, borrow, ADV20, headlines -> score -> gates
              (score >= 70, price >= $10, ADV20 >= $10M) -> save up to 5 picks to
              logs/next_open_picks.json. The scan runs in a thread beside step 15:55.
+             Also gated: no earnings after the scan-day close or in the next 2 sessions, at most 2
+             picks per industry.
   T   15:55  cover every open short. This happens even when the scan fails. No new shorts.
-  T+1 09:31  re-check each pick (shortable / ETB, price >= $10, gap up <= 40%), short at
-             market, 10% of equity each, gross <= 50%.
+  T+1 09:31  first cover any short not opened today (a leftover from a missed cover), then sell
+             the sleeve's longs, then re-check each pick (shortable / ETB, price >= $10, gap up
+             <= 40%), short at market, 5% of equity each, gross <= 50%, DAY buy-stop at +35%.
 
-Overnight long sleeve (config.OVERNIGHT_LONG_ENABLED, off by default; README "Overnight long sleeve")
+Overnight long sleeve (config.OVERNIGHT_LONG_ENABLED, on since 2026-10-23; README "Overnight long sleeve")
   T   15:55  after the cover-all, buy the same picks: 5% of equity each, long gross <= 25%,
              marketable DAY limit at ask x 1.005 (or MOC, sent at 15:49). logs/overnight_longs.json.
   T+1 09:31  the --open job sells every long at market first, waits for the fills, re-sells what
@@ -42,7 +49,8 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from shortingbot import alerts, broker, config, db, news, risk, scoring, shortdata, strategy, tradingview  # noqa: E402
+from shortingbot import (alerts, broker, config, db, earnings, news, risk, scoring, shortdata,  # noqa: E402
+                         strategy, tradingview)
 
 log = logging.getLogger("shortingbot")
 GUARD = os.path.join(config.LOG_DIR, "last_execute.json")       # 15:40 job
@@ -103,10 +111,11 @@ def session_or_fallback():
         return at(9, 30), at(16, 0)
 
 
-def order_id(purpose: str, ticker: str, attempt: int = 0) -> str:
+def order_id(purpose: str, ticker: str, attempt: int = 0, tag: str = "") -> str:
     """Deterministic client_order_id: a POST alpaca-py retries is rejected as a duplicate
-    instead of filling twice (broker._send looks the first one up)."""
-    return f"v2-{purpose}-{dt.datetime.now(broker.ET).date()}-{ticker}-{attempt}{ORDER_ID_SUFFIX}"
+    instead of filling twice (broker._send looks the first one up). `tag` tells apart two runs
+    of the same job on one day (the --cover-leftovers passes: -L1000, -L1200, ...)."""
+    return f"v2-{purpose}-{dt.datetime.now(broker.ET).date()}-{ticker}-{attempt}{tag}{ORDER_ID_SUFFIX}"
 
 
 # ---------------------------------------------------------------- job locks
@@ -166,6 +175,24 @@ def job_lock(name: str):
         _held_locks.discard(name)
         with contextlib.suppress(OSError):
             os.remove(path)
+
+
+def lock_busy(name: str) -> bool:
+    """Another live process holds logs/<name>.lock (a stale one does not count)."""
+    path = os.path.join(config.LOG_DIR, f"{name}.lock")
+    try:
+        raw = open(path).read().strip()
+    except OSError:
+        return False
+    if name in _held_locks:
+        return False
+    pid = int(raw) if raw.isdigit() else None
+    if pid:
+        return _pid_alive(pid)
+    try:
+        return time.time() - os.path.getmtime(path) < 60          # no pid yet: being written
+    except OSError:
+        return False
 
 
 def code_version() -> str | None:
@@ -239,7 +266,7 @@ def print_board(ranked: list[dict]) -> None:
 
 
 CANDIDATE_FIELDS = [
-    "rank", "ticker", "company", "sector", "close", "prev_close", "change", "high", "low", "VWAP",
+    "rank", "ticker", "company", "sector", "industry", "close", "prev_close", "change", "high", "low", "VWAP",
     "market_cap", "volume", "rvol", "upper_wick", "close_in_range", "si_pct_float", "days_to_cover",
     "float_shares", "si_date", "si_source", "short_vol_ratio_latest", "short_vol_ratio_avg",
     "ftd_days", "ftd_max_shares", "shortable", "easy_to_borrow", "adv20_usd", "catalyst", "headlines",
@@ -278,6 +305,9 @@ def write_guard(today: str, sent: list[dict], path: str | None = None, status: s
     blocks a second run (use --force)."""
     path = path or GUARD
     data = {"date": today, "orders": [s.get("id") for s in sent]}
+    shorts = sorted({s["ticker"] for s in sent if s.get("purpose") == "short" and s.get("id")})
+    if shorts:
+        data["shorts"] = shorts                   # names shorted today: not leftovers (opened_today)
     if status:
         data["status"] = status
     tmp = path + ".tmp"
@@ -324,7 +354,8 @@ def is_pdt_error(e) -> bool:
 
 
 # ---------------------------------------------------------------- order sending
-def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0) -> tuple[list[dict], str | None]:
+def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0,
+                tag: str = "") -> tuple[list[dict], str | None]:
     """Send market orders one by one. A rejected order is recorded and the rest go on, except
     after a PDT rejection, which stops the batch. Returns (sent, pdt_message). `attempt` goes
     into each client_order_id, so a later cover pass is a new order, not a duplicate."""
@@ -336,7 +367,7 @@ def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0) -
             continue
         try:
             sent.append({**broker.submit(o["ticker"], o["qty"], o["side"],
-                                         client_order_id=order_id(o["purpose"], o["ticker"], attempt)),
+                                         client_order_id=order_id(o["purpose"], o["ticker"], attempt, tag)),
                          "purpose": o["purpose"]})
             log.info("  %s %s %g (%s)", o["side"].upper(), o["ticker"], o["qty"], o["purpose"], extra=MILESTONE)
         except Exception as e:                     # one rejected order must not stop the others
@@ -638,7 +669,7 @@ def enter_longs(a, today: str, run_id, trade_date, picks: list[dict] | None, cut
 
 # ---------------------------------------------------------------- v2: short_intraday, 15:40 job
 def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None,
-              purpose: str = "cover") -> dict:
+              purpose: str = "cover", only: set[str] | None = None, tag: str = "") -> dict:
     """Buy back every open short. Returns {"planned", "sent", "problems", "left"}.
 
     Each pass cancels the open orders on the names (and on `also_cancel`, today's entries, the
@@ -647,16 +678,18 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
     meanwhile has already covered its name. Shorts still open after a pass get up to
     COVER_EXTRA_PASSES more before the cutoff. If holdings can't be re-read after cancelling,
     nothing is sent: a stale quantity could buy past the short into a long.
+    `only`: cover just these names (the leftovers), never another short. `tag`: order id tag.
     """
     db.set_step("cover")
-    held = retry(broker.signed_holdings, "positions")
+    keep = (lambda t: True) if only is None else (lambda t: t in only)
+    held = {t: q for t, q in retry(broker.signed_holdings, "positions").items() if keep(t)}
     covers = strategy.plan_cover(held, purpose)
     log.info("cover: %d shorts open %s", len(covers),
              {c["ticker"]: -c["qty"] for c in covers} or "{}", extra=MILESTONE)
     out = {"planned": covers, "sent": [], "problems": [], "left": {}}
     if not execute:
         for c in covers:
-            log.info("  DRY RUN would BUY %s %g (cover)", c["ticker"], c["qty"])
+            log.info("  DRY RUN would BUY %s %g (%s)", c["ticker"], c["qty"], purpose)
         return out
     with job_lock("close"):
         symbols = sorted({c["ticker"] for c in covers} | set(also_cancel or []))
@@ -687,11 +720,12 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
                 out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff - covers not sent")
                 out["left"] = {c["ticker"]: -c["qty"] for c in covers}
                 break
-            sent, pdt = send_orders(covers, wait=config.FILL_WAIT_SECONDS, attempt=attempt)
+            sent, pdt = send_orders(covers, wait=config.FILL_WAIT_SECONDS, attempt=attempt, tag=tag)
             out["sent"] += sent
             record_orders(run_id, sent)
             try:
-                out["left"] = {t: q for t, q in retry(broker.signed_holdings, "positions").items() if q < 0}
+                out["left"] = {t: q for t, q in retry(broker.signed_holdings, "positions").items()
+                               if q < 0 and keep(t)}
             except Exception as e:
                 log.warning("could not re-read positions after covering: %s", e)
                 out["left"] = {s["ticker"]: -s["qty"] for s in sent if s.get("status") != "filled"}
@@ -745,8 +779,123 @@ def fresh_covers(symbols: list[str], purpose: str, planned: list[dict]) -> tuple
     return [c for c in strategy.plan_cover(short_now, purpose) if c["ticker"] not in still_open], short_now
 
 
+# ---------------------------------------------------------------- catch-ups: leftover shorts
+def opened_today(today: str) -> set[str] | None:
+    """Names shorted today: the open guard's "shorts", the picks file's entries for today, and
+    Alpaca's filled sells today. None when Alpaca can't be read and the 09:31 job left an
+    unfinished guard (it may have shorted names this file doesn't list): don't guess."""
+    names: set[str] = set()
+    try:
+        g = json.load(open(OPEN_GUARD))
+    except (OSError, ValueError):
+        g = {}
+    if g.get("date") == today:
+        names |= set(g.get("shorts") or [])
+    picks = load_picks(config.PICKS_FILE) or {}
+    if picks.get("trade_date") == today:
+        names |= {e["ticker"] for e in picks.get("entered") or [] if e.get("id") and e.get("status") != "rejected"}
+    try:
+        names |= broker.sold_today()
+    except Exception as e:
+        log.warning("could not read today's sell orders: %s", e)
+        if g.get("date") == today and g.get("status") == "started":
+            return None
+    return names
+
+
+def leftover_shorts(today: str, held: dict[str, float] | None = None) -> dict[str, float] | None:
+    """{ticker: qty < 0} for every short not opened today. None: can't tell (see opened_today)."""
+    held = retry(broker.signed_holdings, "positions") if held is None else held
+    shorts = {t: q for t, q in held.items() if q < 0}
+    if not shorts:
+        return {}
+    mine = opened_today(today)
+    if mine is None:
+        return None
+    return {t: q for t, q in shorts.items() if t not in mine}
+
+
+def cover_leftovers(run_id, today: str, execute: bool, cutoff: dt.datetime, tag: str = "",
+                    when: str = "") -> dict:
+    """Cover the leftover shorts with cover_all (close.lock, passes, ids v2-leftover-DATE-T-n<tag>).
+    Returns cover_all's dict plus "leftovers". Raises LockBusy when another cover is running."""
+    left = leftover_shorts(today)
+    if left is None:
+        log.error("leftover check: today's sells unreadable and the 09:31 run is unfinished - not covering")
+        return {"planned": [], "sent": [], "problems": ["leftover check unreadable"], "left": {}, "leftovers": {}}
+    if not left:
+        log.info("leftover check%s: no shorts from an earlier session", when, extra=MILESTONE)
+        return {"planned": [], "sent": [], "problems": [], "left": {}, "leftovers": {}}
+    log.warning("leftover check%s: %d shorts from an earlier session %s - covering", when, len(left), left,
+                extra=MILESTONE)
+    out = cover_all(run_id, execute, cutoff, purpose="leftover", only=set(left), tag=tag)
+    out["leftovers"] = left
+    for p in out["problems"]:
+        log.error("leftover cover problem: %s", p, extra={"step": "cover"})
+    if execute:
+        names = ", ".join(f"{t} {-q:g}" for t, q in sorted(left.items()))
+        alerts.raise_alert("leftover_covered", f"{today}{when}: covered shorts left from an earlier session: {names}"
+                                               + (f" - STILL SHORT {out['left']}" if out["left"] else ""),
+                           level="warning")
+        if out["left"]:
+            alerts.raise_alert("cover_failed", f"{today}{when}: leftover shorts still open after the cover: "
+                                               f"{out['left']}", level="critical")
+    return out
+
+
+def cover_leftovers_job(a, today: str, mode: str) -> int:
+    """`daily.py --cover-leftovers [--execute]`: any time in market hours (cron 10:00, 12:00, 14:00),
+    cover every short not opened today. Never enters anything. Exits 0 outside market hours,
+    while the 09:31 job runs, or while another cover holds close.lock."""
+    try:
+        session = session_or_fallback()
+        if session is None:
+            log.info("--cover-leftovers: market closed today - nothing to do")
+            return 0
+        now = dt.datetime.now(broker.ET)
+        cutoff = session[1] - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE)
+        if not a.now and not (session[0] <= now <= cutoff):
+            log.info("--cover-leftovers: outside market hours (%s-%s ET) - nothing to do",
+                     f"{session[0]:%H:%M}", f"{cutoff:%H:%M}")
+            return 0
+        if a.execute and lock_busy("open"):
+            log.info("--cover-leftovers: the 09:31 job is running (it covers leftovers itself) - skipping")
+            return 0
+        out = cover_leftovers(None, today, a.execute, cutoff if not a.now else session[1],
+                              tag=f"-L{now:%H%M}", when=f" ({now:%H:%M} safety net)")
+        db.events.flush_to(None)
+        if out["left"] and a.execute:
+            return 1
+        return 2 if out["problems"] else 0
+    except LockBusy as e:
+        log.info("--cover-leftovers: %s - another cover is running, skipping", e)
+        return 0
+    except Exception as e:
+        log.error("cover-leftovers run failed: %s\n%s", e, traceback.format_exc())
+        alerts.raise_alert("run_failed", f"{today} cover-leftovers job: {e}", level="critical")
+        return 1
+
+
+def next_sessions_or_weekdays(today: str, n: int) -> list[dt.date]:
+    """The n sessions after today from the calendar, else the next n weekdays."""
+    d = dt.date.fromisoformat(today)
+    try:
+        out = broker.next_sessions(d, n)
+        if len(out) == n:
+            return out
+    except Exception as e:
+        log.warning("next sessions lookup failed (%s) - using weekdays for the earnings window", e)
+    out = []
+    while len(out) < n:
+        d += dt.timedelta(days=1)
+        if d.weekday() < 5:
+            out.append(d)
+    return out
+
+
 def close_intraday(a, today: str, mode: str) -> int:
     run_id, prev_run_id, cover, scan_box = None, None, None, {}
+    fallback = bool(getattr(a, "fallback", False))
     try:
         db.set_step("setup")
         session = session_or_fallback()
@@ -766,8 +915,23 @@ def close_intraday(a, today: str, mode: str) -> int:
                      scan_at.strftime("%H:%M"), trade_at.strftime("%H:%M"), extra=MILESTONE)
 
         if a.execute and guard_blocks(today) and not a.force:
+            if fallback:
+                log.info("--fallback: today's close job already started or finished - nothing to do")
+                return 0
             log.error("already executed today - use --force to run again")
             return 1
+        if fallback:
+            now = dt.datetime.now(broker.ET)
+            if now > cutoff and not a.now:
+                held = {t: q for t, q in retry(broker.signed_holdings, "positions").items() if q < 0}
+                alerts.raise_alert("close_missed", f"{today}: the close job never ran and the fallback started at "
+                                                   f"{now:%H:%M}, past the {cutoff:%H:%M} ET cutoff - still short "
+                                                   f"{held or 'nothing'}; the 09:31 job covers them",
+                                   level="critical")
+                return 1
+            if a.execute:
+                alerts.raise_alert("close_fallback", f"{today}: the close job did not start - fallback covering "
+                                                     f"now ({now:%H:%M} ET)", level="warning")
 
         # The shorts covered today were entered this morning from the picks saved at the last
         # scan. That scan's run row gets the exit. (Handover from v1: no picks file, so the
@@ -781,7 +945,7 @@ def close_intraday(a, today: str, mode: str) -> int:
             log.warning("next session lookup failed: %s", e)
             trade_date = None
 
-        if not a.now:
+        if not a.now and not fallback:
             wait_until(scan_at, "scan")
         db.heartbeat("running", f"{today}: scanning")
         run = db.insert("short_runs", {"run_date": today, "trade_date": trade_date, "mode": mode,
@@ -799,6 +963,10 @@ def close_intraday(a, today: str, mode: str) -> int:
                 ranked = scan()
                 if not ranked:
                     raise RuntimeError("TradingView returned no gainers")
+                n_earn = earnings.annotate(ranked, dt.date.fromisoformat(today),
+                                           next_sessions_or_weekdays(today, config.EARNINGS_SESSIONS))
+                if n_earn:
+                    log.info("earnings gate: %d of %d names excluded", n_earn, len(ranked), extra=MILESTONE)
                 picks = strategy.select(ranked, acct["equity"])
                 log_etb(ranked, today, a.execute)
                 record_candidates(run_id, ranked)
@@ -837,8 +1005,8 @@ def close_intraday(a, today: str, mode: str) -> int:
             long_out = enter_longs(a, today, run_id, trade_date, picks_now, moc_by if not a.now else close, "moc",
                                    exclude=set(entered) | {t for t, q in held_now.items() if q})
 
-        # 15:55: cover, whatever the scan is doing
-        if not a.now:
+        # 15:55: cover, whatever the scan is doing (the fallback covers at once)
+        if not a.now and not fallback:
             while t_scan.is_alive() and dt.datetime.now(broker.ET) < trade_at:
                 t_scan.join(timeout=max(0.0, min(5.0, (trade_at - dt.datetime.now(broker.ET)).total_seconds())))
             wait_until(trade_at, "cover")
@@ -1008,6 +1176,24 @@ def open_intraday(a, today: str, mode: str) -> int:
             log.error("already entered today - use --force to run again")
             return 1
 
+        # catch-up: a short from an earlier session (missed 15:40 job) is covered first, before
+        # anything can return early. Allowed up to the close cutoff, even when entries are late.
+        leftover = None
+        if config.COVER_LEFTOVERS_AT_OPEN and session is not None:
+            close_cutoff = session[1] - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE)
+            try:
+                pending = leftover_shorts(today)          # None: can't tell, cover_leftovers says so
+                if pending is None or pending:
+                    if a.execute and not a.now:
+                        wait_until(opened + dt.timedelta(seconds=1), "leftover cover at the open")
+                    if a.execute and pending:
+                        write_guard(today, [], OPEN_GUARD, status="started")
+                    leftover = cover_leftovers(None, today, a.execute, close_cutoff if not a.now else session[1],
+                                               when=" (09:31)")
+            except LockBusy as e:
+                alerts.raise_alert("cover_failed", f"{today}: leftover cover at the open not run: {e} "
+                                                   f"(another cover is running)", level="critical")
+
         # overnight long sleeve: sell the longs at the open, before anything else can return early
         long_exit = open_long_exit(a, today, session, opened) if long_sleeve_active() else None
 
@@ -1082,6 +1268,10 @@ def open_intraday(a, today: str, mode: str) -> int:
         sleeve_longs = set(long_exit["left"]) | {x["ticker"] for x in long_exit["planned"]} if long_exit else set()
         if long_exit and not a.execute:           # dry run: the longs would be sold first, then shorted
             held = {t: q for t, q in held.items() if not (q > 0 and t in sleeve_longs)}
+        dry_flat = set((leftover or {}).get("leftovers") or {}) if not a.execute else set()
+        if dry_flat:                              # dry run: the leftovers would be covered first
+            held = {t: q for t, q in held.items() if t not in dry_flat}
+            positions = [p for p in positions if p["ticker"] not in dry_flat]
         existing = sum(abs(p["market_value"]) for p in positions if p["qty"] < 0) / acct["equity"] * 100
         leftover = {t: q for t, q in held.items() if q < 0}
         if leftover:
@@ -1282,13 +1472,19 @@ def main(argv=None) -> int:
     ap.add_argument("--picks", help="picks file for --open (default: logs/next_open_picks.json)")
     ap.add_argument("--half-day-only", action="store_true",
                     help="exit at once unless today's session closes before 16:00 (the 12:40 cron line)")
+    ap.add_argument("--fallback", action="store_true",
+                    help="15:50 safety net for the close job: exit 0 if it started; else cover now, then scan")
+    ap.add_argument("--cover-leftovers", action="store_true",
+                    help="cover every short not opened today, any time in market hours (10:00/12:00/14:00)")
     a = ap.parse_args(argv)
+    if a.open and (a.fallback or a.cover_leftovers):
+        ap.error("--open cannot be combined with --fallback or --cover-leftovers")
 
     setup_logging()
     broker.load_env()
     mode = "execute" if a.execute else "dry_run"
     today = dt.datetime.now(broker.ET).date().isoformat()
-    job = "open" if a.open else "close"
+    job = "open" if a.open else ("leftovers" if a.cover_leftovers else "close")
     global ORDER_ID_SUFFIX
     ORDER_ID_SUFFIX = f"-f{dt.datetime.now(broker.ET):%H%M%S}" if a.force else ""
     if a.half_day_only:
@@ -1301,7 +1497,14 @@ def main(argv=None) -> int:
             log.info("--half-day-only: %s - nothing to do",
                      "market closed today" if session is None else f"regular close {session[1]:%H:%M} ET")
             return 0
-    log.info("=== daily %s run %s | %s | %s ===", job, today, mode, ", ".join(config.STRATEGIES))
+    if a.cover_leftovers:
+        log.info("=== daily cover-leftovers run %s | %s ===", today, mode)
+        return cover_leftovers_job(a, today, mode)
+    if a.fallback and a.execute and guard_blocks(today) and not a.force:
+        log.info("--fallback: today's close job already started or finished - nothing to do")
+        return 0
+    log.info("=== daily %s run %s | %s | %s%s ===", job, today, mode, ", ".join(config.STRATEGIES),
+             " | fallback" if a.fallback else "")
 
     jobs = OPEN_JOBS if a.open else CLOSE_JOBS
     if "short_intraday" in config.STRATEGIES and "short_overnight" in config.STRATEGIES:
@@ -1320,6 +1523,9 @@ def main(argv=None) -> int:
                     continue
                 rc = max(rc, fn(a, today, mode))
     except LockBusy as e:
+        if a.fallback:
+            log.info("--fallback: %s - the close job is running, nothing to do", e)
+            return 0
         log.error("%s - another %s run is going, not starting", e, job)
         alerts.raise_alert("job_locked", f"{today} {job} job not run: {e}", level="critical")
         return 1

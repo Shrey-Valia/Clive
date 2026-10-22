@@ -15,6 +15,8 @@ import monitor
 from conftest import ET, gainer, qty_for, run_daily
 from shortingbot import broker, config, news, risk, strategy
 
+pytestmark = pytest.mark.usefixtures("legacy_v2_config")   # pre-2026-10-23 settings; see conftest
+
 
 def today():
     return dt.datetime.now(ET).date().isoformat()

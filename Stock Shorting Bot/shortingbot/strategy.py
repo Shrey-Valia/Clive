@@ -10,15 +10,26 @@ import math
 from . import config
 
 
+def squeeze_cap_pct() -> float | None:
+    """Largest short, % of equity, whose loss on a SQUEEZE_MOVE_PCT move stays within
+    MAX_SQUEEZE_LOSS_PCT of equity (5% / 100% move -> 5%). None when off."""
+    if config.MAX_SQUEEZE_LOSS_PCT is None or not config.SQUEEZE_MOVE_PCT:
+        return None
+    return config.MAX_SQUEEZE_LOSS_PCT / (config.SQUEEZE_MOVE_PCT / 100)
+
+
 def size_pct(slot: int, n: int = config.N_POSITIONS) -> float:
     """SIZE_PCT_PER_NAME for every slot (v2). With it None: slot 0 gets SIZE_PCT_MAX,
-    slot n-1 gets SIZE_PCT_MIN, linear between (v1)."""
+    slot n-1 gets SIZE_PCT_MIN, linear between (v1). Never above squeeze_cap_pct()."""
     if config.SIZE_PCT_PER_NAME is not None:
-        return config.SIZE_PCT_PER_NAME
-    if n <= 1:
-        return config.SIZE_PCT_MAX
-    step = (config.SIZE_PCT_MAX - config.SIZE_PCT_MIN) / (n - 1)
-    return round(config.SIZE_PCT_MAX - slot * step, 2)
+        pct = config.SIZE_PCT_PER_NAME
+    elif n <= 1:
+        pct = config.SIZE_PCT_MAX
+    else:
+        step = (config.SIZE_PCT_MAX - config.SIZE_PCT_MIN) / (n - 1)
+        pct = round(config.SIZE_PCT_MAX - slot * step, 2)
+    cap = squeeze_cap_pct()
+    return min(pct, cap) if cap is not None else pct
 
 
 def gate_reason(r: dict) -> str | None:
@@ -36,10 +47,18 @@ def gate_reason(r: dict) -> str | None:
     return None
 
 
+def industry_key(r: dict) -> str | None:
+    """The group MAX_PER_INDUSTRY counts: TradingView's industry, else its sector."""
+    return r.get("industry") or r.get("sector") or None
+
+
 def select(ranked: list[dict], equity: float) -> list[dict]:
     """Walk the ranking, skipping exclusions and gated names, until N names have a size of
-    1+ share or the gross cap is used up. Fewer than N, or none, is a valid answer."""
-    picks, gross = [], 0.0
+    1+ share or the gross cap is used up. Fewer than N, or none, is a valid answer.
+
+    Gates in order: scoring's exclusions, gate_reason, the earnings gate (r["earnings_block"],
+    set by earnings.annotate before this runs), then MAX_PER_INDUSTRY among the picks so far."""
+    picks, gross, per_group = [], 0.0, {}
     for r in ranked:
         if len(picks) == config.N_POSITIONS:
             break
@@ -49,6 +68,13 @@ def select(ranked: list[dict], equity: float) -> list[dict]:
         if gated:
             r["exclude_reason"] = gated
             continue
+        if r.get("earnings_block"):
+            r["exclude_reason"] = r["earnings_block"]
+            continue
+        group = industry_key(r)
+        if config.MAX_PER_INDUSTRY and group and per_group.get(group, 0) >= config.MAX_PER_INDUSTRY:
+            r["exclude_reason"] = f"industry cap: {config.MAX_PER_INDUSTRY} picks already in {group}"
+            continue
         pct = min(size_pct(len(picks)), config.MAX_GROSS_PCT - gross)
         qty = math.floor(equity * pct / 100 / r["close"])
         if qty < 1:
@@ -57,6 +83,8 @@ def select(ranked: list[dict], equity: float) -> list[dict]:
         gross += pct
         r.update(selected=True, target_pct=pct, target_qty=-qty)
         picks.append(r)
+        if group:
+            per_group[group] = per_group.get(group, 0) + 1
     return picks
 
 

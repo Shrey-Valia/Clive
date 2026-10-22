@@ -59,7 +59,8 @@ def scenario(fake, fdb, scan_inputs, monkeypatch) -> dict:
     return out
 
 
-def test_flag_off_order_plans_unchanged(fake, fdb, scan_inputs, monkeypatch):
+def test_flag_off_order_plans_unchanged(legacy_v2_config, fake, fdb, scan_inputs, monkeypatch):
+    # pins its own config: the sleeve off and the pre-2026-10-23 v2 settings (conftest.LEGACY_V2)
     assert getattr(config, "OVERNIGHT_LONG_ENABLED", False) is False
     got = json.loads(json.dumps(scenario(fake, fdb, scan_inputs, monkeypatch)))
     if os.environ.get("SHORTBOT_REGEN_PLAN") == "1":

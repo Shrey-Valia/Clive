@@ -17,7 +17,7 @@ COLUMNS = [
     "name", "description", "open", "high", "low", "close", "VWAP",
     "change", "market_cap_basic", "volume", "relative_volume_10d_calc",
     "average_volume_10d_calc", "float_shares_outstanding", "RSI", "SMA20",
-    "sector", "exchange",
+    "sector", "exchange", "industry",
 ]
 
 

@@ -33,16 +33,37 @@ ADV20_MIN_DAYS = 10              # fewer bars than this -> no ADV20 -> excluded 
 
 # ---------------------------------------------------------------- execution
 N_POSITIONS = 5
-SIZE_PCT_PER_NAME = 10.0         # equal size per name, % of equity. The one sizing knob in v2.
+SIZE_PCT_PER_NAME = 5.0          # equal size per name, % of equity. The one sizing knob in v2 (was 10.0).
                                  # None = linear from SIZE_PCT_MAX (rank 1) to SIZE_PCT_MIN (rank N), as v1
 SIZE_PCT_MAX = SIZE_PCT_PER_NAME # v1: 19.0 (with SIZE_PCT_PER_NAME = None)
 SIZE_PCT_MIN = SIZE_PCT_PER_NAME # v1: 15.0
 MAX_GROSS_PCT = 50.0             # total short notional never above this % of equity. v1: 100
+# Squeeze-cost cap: no short is sized so that a SQUEEZE_MOVE_PCT move against it costs more than
+# MAX_SQUEEZE_LOSS_PCT of equity, i.e. size <= MAX_SQUEEZE_LOSS_PCT / (SQUEEZE_MOVE_PCT / 100).
+# 5% / (100% / 100) = 5% of equity per name. With the +35% broker stop the expected worst case
+# per name is ~5% x 35% = 1.75% of equity, plus gap risk (a gap through the stop fills at the gap).
+# None = off.
+MAX_SQUEEZE_LOSS_PCT = 5.0
+SQUEEZE_MOVE_PCT = 100.0
+# Diversification: at most this many picks per TradingView industry (sector when the industry is
+# missing), in rank order, after the other gates. None or 0 = off. Applies to the long sleeve too
+# (it buys the same picks).
+MAX_PER_INDUSTRY = 2
+# Earnings gate: exclude a name that reports after the close on the scan day or on either of the
+# next EARNINGS_SESSIONS sessions (the trade date and the one after). Sources: Supabase
+# market_events (kind EARNINGS, events/sync_events.py) and the Nasdaq earnings calendar, cached
+# for the day in .cache/earnings/. Both sources failing excludes the name (fail closed).
+EARNINGS_GATE = True
+EARNINGS_SESSIONS = 2
+EARNINGS_NASDAQ_URL = "https://api.nasdaq.com/api/calendar/earnings"
+EARNINGS_REQUIRE_NASDAQ = False  # True: a Nasdaq failure alone fails closed (market_events only
+                                 # covers names in recent picks/positions, so it can miss new gainers)
 
 # Broker-side protective stop on each 09:31 short: a DAY buy-stop at fill x (1 + pct/100),
-# cancelled before the 15:55 cover. None = off (owner-approved default; the backtest found
-# stops lowered Sharpe). DAY, not GTC, so a stop can never outlive the cover and open a long.
-BROKER_STOP_PCT = None           # e.g. 35
+# cancelled before the 15:55 cover. None = off. On since 2026-10-23 (owner-approved; the backtest
+# found stops lowered Sharpe, but they cap a squeeze). DAY, not GTC, so a stop can never outlive
+# the cover and open a long.
+BROKER_STOP_PCT = 35
 
 # Account-level halts. None = off.
 DAILY_LOSS_HALT_PCT = None       # account down this % on the day (equity vs last_equity): flatten,
@@ -64,16 +85,21 @@ ALPACA_TIMEOUT_SECONDS = 15      # every Alpaca HTTP call (alpaca-py sets none)
 PICKS_FILE = os.path.join(LOG_DIR, "next_open_picks.json")
 ENTRY_MINUTES_AFTER_OPEN = 1     # short at 09:31
 ENTRY_CUTOFF_MINUTES_AFTER_OPEN = 20   # a late start (Mac asleep) enters nothing after 09:50
+# Catch-ups. Under v2 nothing is short overnight, so a short held at 09:31 that was not opened
+# today is a leftover (a missed 15:40 job). The --open job covers leftovers first (purpose
+# "leftover"), then sells the sleeve's longs, then enters. `daily.py --cover-leftovers --execute`
+# does the same cover at any time in market hours (10:00, 12:00, 14:00 cron lines).
+COVER_LEFTOVERS_AT_OPEN = True
 MAX_GAP_UP_PCT = 40.0            # skip a pick that opens more than this % above its scan price
 
-# ---------------------------------------------------------------- overnight long sleeve (off)
+# ---------------------------------------------------------------- overnight long sleeve (on)
 # Penny Research "LS1 flip": buy v2's own picks at T 15:55 (after the cover-all), sell them at
 # the T+1 open, then the 09:31 v2 short of the same names goes ahead. OOS 2022-2026 with v2:
 # Sharpe 1.25, CAGR 16.4%, max DD -11.1% (v2 alone 1.21 / 10.7% / -8.3%). The long leg alone has
 # a median trade of ~0 and a +2.1 skew; its worst overnight gap was -71%.
-# The real environment can force it on for a dry run: SHORTBOT_OVERNIGHT_LONG=1 (.env cannot,
-# it is read after this module). To run it for real, set the default below to True.
-OVERNIGHT_LONG_ENABLED = os.environ.get("SHORTBOT_OVERNIGHT_LONG", "").strip().lower() in ("1", "true", "yes")
+# On since 2026-10-23 (owner-approved). The real environment can force it off for a run:
+# SHORTBOT_OVERNIGHT_LONG=0 (.env cannot, it is read after this module).
+OVERNIGHT_LONG_ENABLED = os.environ.get("SHORTBOT_OVERNIGHT_LONG", "1").strip().lower() in ("1", "true", "yes")
 OVERNIGHT_LONG_UNIVERSE = "v2_picks"     # exactly the names saved to next_open_picks.json at 15:45
 OVERNIGHT_LONG_SIZE_PCT = 5.0            # % of equity per name
 OVERNIGHT_LONG_MAX_GROSS = 25.0          # total long notional cap, % of equity (open longs included)

@@ -16,6 +16,8 @@ from test_daily import write_picks
 
 FIVE = ["P1", "P2", "P3", "P4", "P5"]
 
+pytestmark = pytest.mark.usefixtures("legacy_v2_config")   # pre-2026-10-23 settings; see conftest
+
 
 def today():
     return dt.datetime.now(ET).date().isoformat()
