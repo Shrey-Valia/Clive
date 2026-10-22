@@ -1,0 +1,135 @@
+<div class="part"><div class="eyebrow">Update · Oct 22 evening</div><h2>The 15:40 run never happened. What changed since</h2></div>
+
+<section class="col">
+  <div class="callout red">
+    <h3>Incident: the Mac went offline from about 15:01 to 16:15 ET</h3>
+    <p>The last good monitor tick was 14:52. At 15:01 the monitor failed because it couldn't resolve <code>paper-api.alpaca.markets</code>, which means the machine had lost its network as it slept. No job ran again until the 16:15 sync. The Mac sleeps after 1 minute (<code>pmset sleep 1</code>), it is on battery (75%, discharging), and no wake is scheduled for weekday mornings. The 09:20 caffeinate job can only keep a machine awake that is already awake.</p>
+    <p>What was missed: the shorting bot's 15:40 cover-all, and the options bot's 15:00 intraday check and 15:45 decision run.</p>
+  </div>
+  <div class="scroll"><table>
+    <thead><tr><th>Held overnight</th><th class="n">Qty</th><th class="n">Unrealized at 16:15</th></tr></thead>
+    <tbody>
+      <tr><td>ASST short</td><td class="n">51</td><td class="n pos">+$84.66</td></tr>
+      <tr><td>AVX short</td><td class="n">412</td><td class="n pos">+$12.36</td></tr>
+      <tr><td>BNC short</td><td class="n">317</td><td class="n pos">+$164.84</td></tr>
+      <tr><td>NAKA short</td><td class="n">201</td><td class="n pos">+$130.65</td></tr>
+      <tr><td>RCEL short</td><td class="n">96</td><td class="n neg">−$21.12</td></tr>
+    </tbody>
+    <caption>Shorting account equity $10,368.78. These are the 5 shorts opened Oct 21 that today's 15:40 run should have covered. They are about +$371 combined, so nothing is lost yet, but they carry one more overnight gap.</caption>
+  </table></div>
+  <p><b>How they get closed:</b> the 09:31 open run now covers every short not opened that day before it does anything else. I checked that order in a sandbox run of tomorrow's sequence. The 10:00, 12:00 and 14:00 <code>--cover-leftovers</code> jobs back it up.</p>
+</section>
+
+<section class="col">
+  <h3>Shorting bot: so a missed run can't strand positions again</h3>
+  <ul>
+    <li><b>Catch-ups.</b>
+      <ul>
+        <li>The open run covers leftovers first.</li>
+        <li><code>--cover-leftovers</code> runs at 10:00, 12:00 and 14:00.</li>
+        <li>A 15:50 <code>--fallback</code> pass does the cover-all if 15:40 never started. Its half-day version runs at 12:50.</li>
+        <li>If a run started but its lock went stale, the fallback takes over. If the run is alive, the fallback stands aside.</li>
+      </ul></li>
+    <li><b>Risk sizing (approved):</b>
+      <ul>
+        <li>5% per name (<code>SIZE_PCT_PER_NAME=5</code>).</li>
+        <li>A 35% DAY buy-stop at the broker on every short (<code>BROKER_STOP_PCT=35</code>).</li>
+        <li>A 5% maximum squeeze-loss budget per name.</li>
+      </ul></li>
+    <li><b>New gates:</b>
+      <ul>
+        <li>At most 2 picks from the same TradingView industry.</li>
+        <li>No names with earnings within 2 sessions, using the events table plus Nasdaq. If Nasdaq can't be reached, the gate fails closed and drops the name.</li>
+      </ul></li>
+    <li><b>Overnight long sleeve: ON.</b>
+      <ul>
+        <li>At 15:55 it buys v2's own picks at 5% each, 25% gross at most.</li>
+        <li>They are sold at the next open, before the short goes out.</li>
+        <li>A long that missed its exit is sold by the next catch-up job.</li>
+        <li>Note: a sleeve exit sells every long in this account, so keep manual positions elsewhere.</li>
+      </ul></li>
+    <li><b>Second review, all 11 findings fixed:</b>
+      <ul>
+        <li>The open run uses a calendar fallback.</li>
+        <li>The leftover-cover step catches every error.</li>
+        <li>No blind re-send when holdings can't be read.</li>
+        <li>The earnings gate fails closed.</li>
+        <li>Alerts, guard finalisation, market-hours checks and the holiday list.</li>
+      </ul>
+      208 tests pass. Commit <code>092c873</code>.</li>
+    <li><b>PDT:</b> <code>PDT_ENFORCE="auto"</code>, because FINRA retired the pattern-day-trader rule on 2026-06-04.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h3>Options bot</h3>
+  <ul>
+    <li><b>QQQ dropped</b> from the dip put credit spread. The universe is now SPY and IWM.</li>
+    <li><b>New $15,000 paper account</b> (level 3) with new keys in <code>Options Bot/.env</code>.
+      <ul>
+        <li>The old account pin is archived. The bot pins the new account on its next execute.</li>
+        <li>It refuses to run if it ever finds itself on the shorting account.</li>
+      </ul></li>
+    <li><b>SPY iron condor: ON.</b>
+      <ul>
+        <li>0.10Δ short strikes, 3% wings, about 60 DTE, closed the day before expiry.</li>
+        <li>At $15k it sizes 1 condor at $2,276 maximum loss, 15.2% of equity and under the 20% cap.</li>
+      </ul></li>
+    <li>119 live tests pass. The condor regression test now pins its own config, so changes elsewhere don't break it.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h3>Monitoring, hosting, dashboard</h3>
+  <ul>
+    <li><b>Health probe and <code>/health</code> tab</b> (F6 or <code>HLTH</code>).
+      <ul>
+        <li>A read-only check runs every 15 minutes from 09:00 to 16:45, plus 07:15 and 17:00.</li>
+        <li>It checks that every scheduled job ran, that there are no leftover positions, that heartbeats are fresh, and that the host is awake.</li>
+        <li>Results go to <code>health_checks</code> and <code>alerts</code> (migration 008). A pill in the terminal chrome shows the worst status.</li>
+        <li>Its first run reported today's incident: 10 failures out of 58 checks.</li>
+      </ul></li>
+    <li><b>Free-VM deploy kit</b> (<code>deploy/</code>). This is the permanent fix for the sleeping Mac.
+      <ul>
+        <li>Targets Oracle Always Free A1 in Ashburn on Ubuntu 24.04, with GCP e2-micro as the fallback.</li>
+        <li>17 systemd timers on New York time.</li>
+        <li><code>clive-mode off|shadow|live</code>, so the VM can shadow the Mac before it takes over.</li>
+        <li>A Healthchecks.io dead-man switch.</li>
+      </ul></li>
+    <li><b>Shift-to-type:</b> pressing Shift and then typing anywhere in the dashboard now focuses the command bar.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <h3>Schedule now installed (ET, weekdays)</h3>
+  <div class="scroll"><table>
+    <thead><tr><th>Time</th><th>Job</th></tr></thead>
+    <tbody>
+      <tr><td>07:00</td><td class="why">Events calendar sync (daily)</td></tr>
+      <tr><td>07:15 · */15 09–16 · 17:00</td><td class="why">Health probe</td></tr>
+      <tr><td>09:20</td><td class="why">caffeinate, 7 hours (needs the Mac already awake)</td></tr>
+      <tr><td>09:31</td><td class="why">Shorting: cover leftovers → sell sleeve longs → short saved picks</td></tr>
+      <tr><td>09:45</td><td class="why">Options: sweep</td></tr>
+      <tr><td>*/15 09–15</td><td class="why">Shorting: monitor</td></tr>
+      <tr><td>10:00 · 12:00 · 14:00</td><td class="why">Shorting: cover-leftovers catch-up</td></tr>
+      <tr><td>*/15 10–14 · 15:00/15/30</td><td class="why">Options: intraday checks</td></tr>
+      <tr><td>12:40 · 12:45 · 12:50</td><td class="why">Half-day runs: shorting execute, options execute, shorting fallback (they no-op on full days)</td></tr>
+      <tr><td>15:40</td><td class="why">Shorting: scan, cover-all at 15:55, sleeve buys, save tomorrow's picks</td></tr>
+      <tr><td>15:45</td><td class="why">Options: decision run (15:55 entries)</td></tr>
+      <tr><td>15:50</td><td class="why">Shorting: fallback cover-all if 15:40 didn't run</td></tr>
+      <tr><td>16:15</td><td class="why">Both bots: sync fills and equity to Supabase</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section class="col">
+  <h3>Your to-do list</h3>
+  <ol class="steps">
+    <li><b>Tonight: stop the Mac sleeping.</b> These aren't done yet: sleep is still 1 minute and no weekday wake is scheduled. Run <code>sudo pmset repeat wakeorpoweron MTWRF 09:20:00</code> and <code>sudo pmset -c sleep 0</code>, then plug in and leave the lid open.</li>
+    <li><b>Tomorrow, after 09:35:</b> check that the 5 held shorts are gone, on the <code>/health</code> tab or in Alpaca. If any remain, the 10:00 catch-up retries.</li>
+    <li><b>Create the Oracle VM</b> and fill in <code>deploy/vm.conf</code>. Then I can bootstrap it and run it in shadow mode.</li>
+    <li><b>Set <code>NTFY_TOPIC</code></b> so health failures push to your phone. Today's incident would have alerted you at 15:15.</li>
+    <li><b>Delete the empty Vincio org</b> in the Supabase dashboard. Its projects are already deleted.</li>
+    <li><b>Regenerate the paper keys</b> that were pasted in chat. This is low priority while the accounts are paper.</li>
+  </ol>
+</section>

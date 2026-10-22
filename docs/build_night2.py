@@ -12,11 +12,14 @@ IMAGES = {
     "IMG_EVENTS": os.path.join(SCRATCH, "ev-events-1440.png"),
 }
 LONGSIDE = os.path.join(HERE, "fragments", "night2_longside.html")
+UPDATE = os.path.join(HERE, "fragments", "night2_update.html")
 
 html = open(os.path.join(HERE, "night2.template.html")).read()
 html = html.replace("{{STYLE}}", open(os.path.join(HERE, "_style.html")).read())
 if os.path.exists(LONGSIDE):
     html = html.replace("<!--LONGSIDE-->", open(LONGSIDE).read())
+if os.path.exists(UPDATE):
+    html = html.replace("<!--UPDATE-->", open(UPDATE).read())
 for key, path in IMAGES.items():
     if os.path.exists(path):
         html = html.replace("{{" + key + "}}", "data:image/png;base64," + base64.b64encode(open(path, "rb").read()).decode())
