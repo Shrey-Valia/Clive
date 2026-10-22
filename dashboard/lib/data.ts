@@ -9,6 +9,7 @@ import type { Account, Bot, BotAlert, Candidate, LogLine, LucidAccount, MarketEv
 import type { Pick } from "@/lib/analytics";
 import { alerts as computeAlerts, entryDate, runFlow, v2Runs } from "@/lib/analytics";
 import { addDays, etParts } from "@/lib/time";
+import { pillOf, type HealthData, type HealthPill, type HealthRow, type HistPoint } from "@/lib/health";
 
 export type { Account, Bot, Candidate, LogLine, LucidAccount, Order, Position, Run, Snap, Trade } from "@/lib/types";
 
@@ -312,4 +313,43 @@ export const getOptionsLive = cache(async (): Promise<OptionsLive | null> => {
     trades: trades.map((r) => numify(r, OTR_NUM) as unknown as OptTrade),
     events: events.filter(() => true), syncs, alerts: alertRows.filter((a) => a.bot_id === "options"),
   };
+});
+
+// ------------------------------------------------------------------ health checks (008)
+/** Latest row per check and host (health_latest) plus 24 h of history. 008 not applied → missing. */
+export const getHealth = cache(async (): Promise<HealthData | null> => {
+  if (isDemo) {
+    const { demoHealth } = await import("@/lib/demo-health");
+    return demoHealth();
+  }
+  const sb = await adminClient();
+  if (!sb) return null;
+  try {
+    const { data, error } = await sb.from("health_latest").select("*").limit(3000);
+    if (error) return { missing: true, sample: false, latest: [], history: [], error: error.message };
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const history: HistPoint[] = [];
+    for (let page = 0; page < 20; page++) {
+      const { data: h, error: he } = await sb.from("health_checks").select("run_at,host,component,check_name,status")
+        .gte("run_at", since).neq("component", "summary").order("run_at").range(page * 1000, page * 1000 + 999);
+      if (he || !h) break;
+      history.push(...(h as HistPoint[]));
+      if (h.length < 1000) break;
+    }
+    return { missing: false, sample: false, latest: (data ?? []) as HealthRow[], history };
+  } catch (e) {
+    return { missing: true, sample: false, latest: [], history: [], error: String(e) };
+  }
+});
+
+/** The chrome's health pill. Only the latest rows (no history); null when not an admin. */
+export const getHealthPill = cache(async (): Promise<HealthPill | null> => {
+  if (isDemo) return pillOf((await getHealth())?.latest ?? null, false);
+  const sb = await adminClient().catch(() => null);
+  if (!sb) return null;
+  try {
+    const { data, error } = await sb.from("health_latest").select("run_at,host,component,check_name,status").limit(3000);
+    if (error) return pillOf(null, true);
+    return pillOf((data ?? []) as HealthRow[], false);
+  } catch { return null; }
 });

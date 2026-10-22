@@ -5,7 +5,7 @@ import { TopBar } from "@/components/Terminal";
 import { AlertBanner } from "@/components/Bits";
 import { AutoRefresh, ChromeGate, StatusBar } from "@/components/Live";
 import { EventStrip } from "@/components/Events";
-import { getChrome, getEvents, getTape, isDemo } from "@/lib/data";
+import { getChrome, getEvents, getHealthPill, getTape, isDemo } from "@/lib/data";
 import { etParts } from "@/lib/time";
 import "./globals.css";
 
@@ -15,16 +15,17 @@ export const metadata: Metadata = { title: "Clive Terminal", description: "Every
 export const viewport: Viewport = { themeColor: "#000000", width: "device-width", initialScale: 1, viewportFit: "cover" };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const [tape, chrome, ev] = await Promise.all([
+  const [tape, chrome, ev, health] = await Promise.all([
     getTape().catch(() => ({ date: null, live: false, items: [] })),
     getChrome().catch(() => ({ alerts: [], email: null, positions: null, gross: null, equity: null, lastSync: null, tickers: [] as string[], flow: "overnight_v1" as const })),
     getEvents().catch(() => null),
+    getHealthPill().catch(() => null),
   ]);
   return (
     <html lang="en" className={mono.variable}>
       <body>
         <ChromeGate>
-          <TopBar demo={isDemo} tickers={chrome.tickers} flow={chrome.flow} />
+          <TopBar demo={isDemo} tickers={chrome.tickers} flow={chrome.flow} health={health} />
           <Tape {...tape} />
           {ev && !ev.missing && <EventStrip events={ev.events} today={etParts().date} sample={ev.sample} />}
           <AlertBanner alerts={chrome.alerts} />

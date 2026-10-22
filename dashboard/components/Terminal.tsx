@@ -11,6 +11,7 @@ const KEYS = [
   { key: "F3", n: "3", g: "r", code: "RUNS", href: "/shorting/runs", label: "Run history" },
   { key: "F4", n: "4", g: "o", code: "OPTN", href: "/options", label: "Options" },
   { key: "F5", n: "5", g: "e", code: "EVT", href: "/events", label: "Events" },
+  { key: "F6", n: "6", g: "k", code: "HLTH", href: "/health", label: "Health" },
 ];
 const SECONDARY = [{ g: "l", code: "LUCD", href: "/lucid", label: "Lucid (inactive)" }];
 
@@ -29,11 +30,24 @@ const COMMANDS: Cmd[] = [
   { word: "CAL", desc: "Events month calendar", href: "/events#cal" },
   { word: "FOMC", desc: "FOMC decisions, press conferences and minutes", href: "/events?k=FOMC" },
   { word: "ALRT", desc: "Open bot alerts", href: "/shorting#alerts" },
+  { word: "HLTH", desc: "System health: missed runs, leftover positions, data sources, host", href: "/health" },
+  { word: "FIX", desc: "Health: what's broken and how to fix it", href: "/health#fix" },
   { word: "LUCD", desc: "Lucid bot (inactive)", href: "/lucid" },
   { word: "HELP", desc: "List commands and keys" },
 ];
 const ALIASES: Record<string, string> = { OV: "HOME", SHORT: "SHRT", SHORTING: "SHRT", LUCID: "LUCD", OPT: "OPTN", OPTIONS: "OPTN", HISTORY: "RUNS", "?": "HELP",
-  EVENTS: "EVT", EVTS: "EVT", ECO: "EVT", CALENDAR: "CAL", FED: "FOMC", ALERTS: "ALRT" };
+  EVENTS: "EVT", EVTS: "EVT", ECO: "EVT", CALENDAR: "CAL", FED: "FOMC", ALERTS: "ALRT",
+  HEALTH: "HLTH", STATUS: "HLTH", SYS: "HLTH", HLT: "HLTH" };
+
+export type HealthPillData = { status: "ok" | "warn" | "fail" | "unknown"; fails: number; warns: number; stale: boolean; missing: boolean };
+
+/** Top-chrome health pill: OK / WARN n / FAIL n, links to /health. */
+function HealthPill({ h }: { h: HealthPillData }) {
+  const cls = h.missing ? "off" : h.status === "fail" ? "bad" : h.status === "warn" ? "warn" : h.status === "ok" ? "ok" : "off";
+  const text = h.missing ? "HLTH —" : h.status === "fail" ? `HLTH ${h.fails} FAIL` : h.status === "warn" ? `HLTH ${h.warns} WARN` : h.status === "ok" ? "HLTH OK" : "HLTH ?";
+  const title = h.missing ? "Health table not set up yet (migration 008)" : `${h.fails} failing, ${h.warns} warning checks${h.stale ? " · the probe has gone quiet" : ""}`;
+  return <Link href="/health" className={`pill ${cls} hpill`} title={title} aria-label={`System health: ${title}`}>{text}</Link>;
+}
 
 function flash(el: Element | null) {
   if (!el) return false;
@@ -59,7 +73,7 @@ function useNow() {
   return now;
 }
 
-export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: boolean; tickers?: string[]; flow?: Flow }) {
+export function TopBar({ demo, tickers = [], flow = "overnight_v1", health = null }: { demo: boolean; tickers?: string[]; flow?: Flow; health?: HealthPillData | null }) {
   const path = usePathname();
   const router = useRouter();
   const now = useNow();
@@ -71,6 +85,7 @@ export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: bo
   const [mobileCmd, setMobileCmd] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const gPending = useRef(0);
+  const shiftArmed = useRef(0);       // a lone Shift tap arms "type into the command bar" for 1.5 s
 
   const suggestions = useMemo(() => {
     const w = cmd.trim().toUpperCase();
@@ -106,14 +121,32 @@ export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: bo
     setErr(`UNKNOWN: ${w} · TYPE HELP`);
   }, [path, router, tickers]);
 
-  // keyboard: F-keys, 1–4, g-chords, / and ?
+  // keyboard: F-keys, 1–6, g-chords, / and ?, and Shift-to-type into the command bar
   useEffect(() => {
+    const isTyping = (t: EventTarget | null) =>
+      t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t as HTMLElement)?.isContentEditable;
+    /** Focus the command bar with `ch` already typed; the next keys land in the input by themselves. */
+    function typeIntoBar(ch: string) {
+      setMobileCmd(true); setErr(""); setSel(0); setOpen(true);
+      setCmd((c) => c + ch.toUpperCase());
+      setTimeout(() => { const el = input.current; if (el) { el.focus(); const n = el.value.length; el.setSelectionRange(n, n); } }, 0);
+    }
     function onKey(e: KeyboardEvent) {
-      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement)?.isContentEditable;
-      if (e.key === "Escape") { setHelp(false); setOpen(false); return; }
+      const typing = isTyping(e.target);
+      if (e.key === "Escape") { setHelp(false); setOpen(false); shiftArmed.current = 0; return; }
       const f = KEYS.find((x) => x.key === e.key);
       if (f) { e.preventDefault(); router.push(f.href); return; }
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "Shift") return;                                  // armed on keyup if nothing else was pressed
+      const printable = e.key.length === 1 && /[A-Za-z0-9.]/.test(e.key);
+      // Shift+letter, or a letter right after a lone Shift tap: start a command. Plain keys keep their shortcuts.
+      if (printable && (e.shiftKey || Date.now() - shiftArmed.current < 1500)) {
+        shiftArmed.current = 0;
+        e.preventDefault();
+        typeIntoBar(e.key);
+        return;
+      }
+      shiftArmed.current = 0;
       if (e.key === "/") { e.preventDefault(); setMobileCmd(true); setTimeout(() => input.current?.focus(), 0); return; }
       if (e.key === "?") { e.preventDefault(); setHelp((v) => !v); return; }
       if (Date.now() - gPending.current < 1200) {
@@ -126,8 +159,15 @@ export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: bo
       const n = KEYS.find((x) => x.n === e.key);
       if (n) { e.preventDefault(); router.push(n.href); }
     }
+    let lastDown = "";
+    const onDown = (e: KeyboardEvent) => { lastDown = e.key; };
+    const onUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift" && lastDown === "Shift" && !isTyping(e.target)) shiftArmed.current = Date.now();
+    };
+    window.addEventListener("keydown", onDown, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onUp);
+    return () => { window.removeEventListener("keydown", onDown, true); window.removeEventListener("keydown", onKey); window.removeEventListener("keyup", onUp); };
   }, [router]);
 
   // deep links: /shorting#t=TICKER flashes the row, #risk / #p3 flashes the panel
@@ -188,6 +228,7 @@ export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: bo
         {err && <span className="cmderr" role="alert">{err}</span>}
         <div className="clock">
           {demo && <span className="pill warn">DEMO DATA</span>}
+          {health && <HealthPill h={health} />}
           {mkt && <span className={`pill ${mkt.cls}`}>{mkt.label}</span>}
           {nr && nrLeft !== null && (
             <span className={`pill ${nrLeft < 15 * 60_000 ? "warn" : "off"} nextrun`} title={`Next bot step: ${nr.kind} on ${nr.date}`}>
@@ -219,6 +260,7 @@ export function TopBar({ demo, tickers = [], flow = "overnight_v1" }: { demo: bo
                 <h3>KEYS</h3>
                 <dl className="keys">
                   <dt><kbd>/</kbd></dt><dd>Command bar</dd>
+                  <dt><kbd>⇧</kbd> then type</dt><dd>Type straight into the command bar (Shift+letter, or tap Shift then type)</dd>
                   <dt><kbd>?</kbd></dt><dd>This overlay</dd>
                   {KEYS.map((k) => <Fragment key={k.key}><dt><kbd>{k.n}</kbd> <kbd>{k.key}</kbd> <kbd>g</kbd><kbd>{k.g}</kbd></dt><dd>{k.label}</dd></Fragment>)}
                   <dt><kbd>g</kbd><kbd>l</kbd></dt><dd>Lucid bot</dd>
