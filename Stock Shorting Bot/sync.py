@@ -60,10 +60,21 @@ def tag_run_ids(trades: list[dict]) -> list[dict]:
         chunk = ids[i:i + 100]
         for row in db.select("short_orders", {"select": "id,run_id", "id": f"in.({','.join(chunk)})"}):
             run_of[row["id"]] = row.get("run_id")
+    # the overnight long sleeve's trades: short_orders.sleeve (migration 007) on the entry order
+    long_ids = sorted({t["entry_order_id"] for t in trades if t.get("side") == "long" and t.get("entry_order_id")})
+    sleeve_of = {}
+    for i in range(0, len(long_ids), 100):
+        chunk = long_ids[i:i + 100]
+        for row in db.select("short_orders", {"select": "id,sleeve", "id": f"in.({','.join(chunk)})"}):
+            if row.get("sleeve"):
+                sleeve_of[row["id"]] = row["sleeve"]
     out = []
     for t in trades:
         t = dict(t)
-        t["run_id"] = run_of.get(t.pop("entry_order_id", None))
+        oid = t.pop("entry_order_id", None)
+        t["run_id"] = run_of.get(oid)
+        if oid in sleeve_of:
+            t["sleeve"] = sleeve_of[oid]
         out.append(t)
     return out
 

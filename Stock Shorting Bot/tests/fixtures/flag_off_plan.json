@@ -1,0 +1,79 @@
+{
+ "close": {
+  "events": [
+   [
+    "cancel",
+    [
+     "OLD"
+    ]
+   ],
+   [
+    "submit",
+    "buy",
+    "OLD",
+    10
+   ]
+  ],
+  "client_ids": [
+   "v2-cover-DATE-OLD-0"
+  ],
+  "positions": {
+   "LNG": 5
+  },
+  "picks": [
+   "G0",
+   "G1",
+   "G2",
+   "G3",
+   "G4"
+  ]
+ },
+ "open": {
+  "events": [
+   [
+    "submit",
+    "sell",
+    "A",
+    50
+   ]
+  ],
+  "client_ids": [
+   "v2-short-DATE-A-0"
+  ],
+  "positions": {
+   "A": -50,
+   "LNG": 5,
+   "SHT": -4
+  }
+ },
+ "halt": {
+  "events": [
+   [
+    "cancel",
+    [
+     "A",
+     "SHT"
+    ]
+   ],
+   [
+    "submit",
+    "buy",
+    "A",
+    50
+   ],
+   [
+    "submit",
+    "buy",
+    "SHT",
+    4
+   ]
+  ],
+  "client_ids": [
+   "v2-flatten-DATE-A-0",
+   "v2-flatten-DATE-SHT-0"
+  ],
+  "positions": {
+   "LNG": 5
+  }
+ }
+}

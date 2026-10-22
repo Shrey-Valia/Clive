@@ -15,7 +15,8 @@ from alpaca.data.timeframe import TimeFrame
 import requests
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, StopOrderRequest
+from alpaca.trading.requests import (GetCalendarRequest, GetOrdersRequest, LimitOrderRequest, MarketOrderRequest,
+                                     StopOrderRequest)
 
 from . import config
 
@@ -208,6 +209,27 @@ def submit_stop(ticker: str, qty: int, stop_price: float, client_order_id: str |
     return order_dict(o)
 
 
+LONG_ORDER_KINDS = {"market": TimeInForce.DAY, "limit": TimeInForce.DAY, "moc": TimeInForce.CLS,
+                    "opg": TimeInForce.OPG}
+
+
+def submit_long(ticker: str, qty: float, side: str, kind: str, limit_price: float | None = None,
+                client_order_id: str | None = None) -> dict:
+    """Overnight long sleeve orders. kind: "limit" (DAY limit at limit_price), "moc" (market on
+    close), "opg" (market on open) or "market" (DAY market). Regular hours only."""
+    if kind not in LONG_ORDER_KINDS:
+        raise ValueError(f"unknown order kind {kind!r}")
+    common = dict(symbol=ticker, qty=qty, side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+                  time_in_force=LONG_ORDER_KINDS[kind], client_order_id=client_order_id)
+    if kind == "limit":
+        if not limit_price:
+            raise ValueError("a limit order needs a limit price")
+        req = LimitOrderRequest(limit_price=round(limit_price, 2), **common)
+    else:
+        req = MarketOrderRequest(**common)
+    return order_dict(_send(req))
+
+
 def wait_no_open_orders(symbols: list[str], seconds: int = 10) -> bool:
     """After a cancel: poll until no order on `symbols` is still open (a stop may fill instead)."""
     deadline = time.time() + seconds
@@ -251,6 +273,7 @@ def order_dict(o) -> dict:
         "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price else None,
         "filled_at": o.filled_at.isoformat() if o.filled_at else None,
         "stop_price": float(o.stop_price) if getattr(o, "stop_price", None) else None,
+        **({"limit_price": float(o.limit_price)} if getattr(o, "limit_price", None) else {}),
     }
 
 
@@ -347,4 +370,48 @@ def last_prices(tickers: list[str], today_only: bool = True) -> dict[str, float 
                     out[t] = round((float(q.bid_price) + float(q.ask_price)) / 2, 4)
         except Exception as e:
             log.warning("latest quotes failed: %s", e)
+    return out
+
+
+def quotes(tickers: list[str]) -> dict[str, dict]:
+    """{ticker: {"bid", "ask", "mid", "last"}} from the latest IEX quote and trade (any day).
+    Missing values are None; nothing raises."""
+    out = {t: {"bid": None, "ask": None, "mid": None, "last": None} for t in tickers}
+    if not tickers:
+        return out
+    try:
+        for t, q in data_client().get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=tickers, feed=DataFeed.IEX)).items():
+            if q and q.bid_price and q.ask_price and q.ask_price >= q.bid_price:
+                bid, ask = float(q.bid_price), float(q.ask_price)
+                out[t].update(bid=bid, ask=ask, mid=round((bid + ask) / 2, 4))
+    except Exception as e:
+        log.warning("latest quotes failed: %s", e)
+    try:
+        for t, tr in data_client().get_stock_latest_trade(
+                StockLatestTradeRequest(symbol_or_symbols=tickers, feed=DataFeed.IEX)).items():
+            if tr and tr.price:
+                out[t]["last"] = float(tr.price)
+    except Exception as e:
+        log.warning("latest trades failed: %s", e)
+    return out
+
+
+def open_prints(tickers: list[str]) -> dict[str, float | None]:
+    """Today's opening print per ticker: the open of the first IEX 1-minute bar at or after 09:30.
+    None when there is no bar yet. Read-only, for the long sleeve's fill log."""
+    out = {t: None for t in tickers}
+    if not tickers:
+        return out
+    now = dt.datetime.now(ET)
+    start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    try:
+        bars = data_client().get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=tickers, timeframe=TimeFrame.Minute, start=start,
+            end=start + dt.timedelta(minutes=5), feed=DataFeed.IEX)).data
+        for t, rows in bars.items():
+            if rows:
+                out[t] = float(rows[0].open)
+    except Exception as e:
+        log.warning("open prints failed: %s", e)
     return out

@@ -17,6 +17,12 @@ v2 schedule (short_intraday), research/PROPOSAL.md
   T+1 09:31  re-check each pick (shortable / ETB, price >= $10, gap up <= 40%), short at
              market, 10% of equity each, gross <= 50%.
 
+Overnight long sleeve (config.OVERNIGHT_LONG_ENABLED, off by default; README "Overnight long sleeve")
+  T   15:55  after the cover-all, buy the same picks: 5% of equity each, long gross <= 25%,
+             marketable DAY limit at ask x 1.005 (or MOC, sent at 15:49). logs/overnight_longs.json.
+  T+1 09:31  the --open job sells every long at market first, waits for the fills, re-sells what
+             is left (up to 2 more passes, until 09:50), and only then shorts the picks.
+
 v1 (short_overnight) is the original bot: 15:55 cancel, net holdings against the new top 5
 and hold overnight. It is off; see the README to switch back.
 """
@@ -357,6 +363,279 @@ def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0) -
     return sent, pdt
 
 
+# ---------------------------------------------------------------- ETB history (research)
+ETB_FIELDS = ["date", "ticker", "price", "shortable", "etb"]
+
+
+def log_etb(ranked: list[dict], today: str, execute: bool) -> int:
+    """Append every scanned name's Alpaca shortable / easy_to_borrow flags to
+    logs/etb_history.csv (dry runs: etb_history.dry_run.csv). Returns rows written. Never raises."""
+    name = config.ETB_HISTORY_FILE if execute else config.ETB_HISTORY_FILE.replace(".csv", ".dry_run.csv")
+    path = os.path.join(config.LOG_DIR, name)
+    try:
+        import csv
+        new = not os.path.exists(path)
+        with open(path, "a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=ETB_FIELDS)
+            if new:
+                w.writeheader()
+            for r in ranked:
+                flag = lambda k: "" if r.get(k) is None else int(bool(r.get(k)))
+                w.writerow({"date": today, "ticker": r["ticker"], "price": r.get("close"),
+                            "shortable": flag("shortable"), "etb": flag("easy_to_borrow")})
+        return len(ranked)
+    except Exception as e:
+        log.warning("could not append %s: %s", name, e)
+        return 0
+
+
+# ---------------------------------------------------------------- overnight long sleeve
+SLEEVE = "overnight_long"
+
+
+def long_state_path(execute: bool = True) -> str:
+    return os.path.join(config.LOG_DIR, "overnight_longs.json" if execute else "overnight_longs.dry_run.json")
+
+
+def long_state_has_open(state: dict | None) -> bool:
+    """The state file says the sleeve bought something that has not been sold yet."""
+    return bool(state and state.get("status") not in ("exited", "flattened")
+                and any(o.get("status") != "rejected" for o in state.get("orders") or []))
+
+
+def long_sleeve_active() -> bool:
+    """Run the exit / flatten / monitor checks: the sleeve is on, or it was on and still has
+    longs on the books (turning the flag off never strands a position)."""
+    return config.OVERNIGHT_LONG_ENABLED or long_state_has_open(load_picks(long_state_path()))
+
+
+def send_long_orders(orders: list[dict], kind: str, action: str, attempt: int = 0,
+                     wait: float | None = None) -> list[dict]:
+    """Send the sleeve's orders with broker.submit_long. client_order_id v2-long-<action>-DATE-T-n
+    (action buy / sell / flatten). A rejection is recorded and the rest go on."""
+    sent = []
+    for o in orders:
+        try:
+            r = broker.submit_long(o["ticker"], o["qty"], o["side"], kind, limit_price=o.get("limit_price"),
+                                   client_order_id=order_id(f"long-{action}", o["ticker"], attempt))
+            sent.append({**o, **r, "purpose": o["purpose"], "sleeve": SLEEVE})
+            log.info("  %s %s %g (%s, %s%s)", o["side"].upper(), o["ticker"], o["qty"], o["purpose"], kind,
+                     f" ${o['limit_price']:.2f}" if o.get("limit_price") else "", extra=MILESTONE)
+        except Exception as e:
+            log.error("  order rejected %s %s: %s", o["side"], o["ticker"], e)
+            sent.append({**o, "id": None, "status": "rejected", "error": str(e)[:300], "sleeve": SLEEVE})
+    ids = [x["id"] for x in sent if x.get("id")]
+    if ids:
+        try:
+            states = broker.wait_filled(ids, wait) if wait else broker.refresh(ids)
+            live = {x["id"]: x for x in states}
+            sent = [{**x, **live.get(x.get("id"), {})} for x in sent]
+        except Exception as e:
+            log.warning("order status refresh failed: %s", e)
+    return sent
+
+
+def long_record(run_id, sent: list[dict]) -> None:
+    record_orders(run_id, [{k: v for k, v in x.items() if k not in ("price", "target_pct")} for x in sent])
+
+
+def exit_longs(run_id, execute: bool, deadline: dt.datetime, purpose: str = "long_exit",
+               action: str = "sell", first_kind: str = "market", first_wait: float | None = None,
+               before_send=None) -> dict:
+    """Sell every long. Returns {"planned", "sent", "left", "problems"}.
+
+    The cover_all pattern for the long side: each pass cancels open orders on the names, waits for
+    them to go, re-reads positions and sells exactly what is still long, then waits for the fills.
+    Longs left get up to OVERNIGHT_LONG_EXIT_EXTRA_PASSES more passes before `deadline`. Positions
+    unreadable after a cancel: nothing is sent (a stale qty could sell past the long into a short).
+    Only the first pass may use first_kind ("opg"); later passes are DAY market orders."""
+    db.set_step("long_exit")
+    held = retry(broker.signed_holdings, "positions")
+    plan = strategy.plan_long_exits(held, purpose)
+    log.info("long exit: %d longs open %s", len(plan), {p["ticker"]: p["qty"] for p in plan} or "{}", extra=MILESTONE)
+    out = {"planned": plan, "sent": [], "left": {}, "problems": []}
+    if not execute:
+        for p in plan:
+            log.info("  DRY RUN would SELL %s %g (%s)", p["ticker"], p["qty"], purpose)
+        out["left"] = {p["ticker"]: p["qty"] for p in plan}
+        return out
+    if not plan:
+        return out
+    with job_lock("close"):                       # monitor.py's flatten can't sell the same longs at once
+        symbols = [p["ticker"] for p in plan]
+        for attempt in range(1 + config.OVERNIGHT_LONG_EXIT_EXTRA_PASSES):
+            if attempt:
+                symbols = sorted(out["left"])
+                if dt.datetime.now(broker.ET) > deadline:
+                    out["problems"].append(f"past the {deadline:%H:%M} ET long exit deadline after {attempt} passes")
+                    break
+                log.warning("long exit pass %d: still long %s", attempt + 1, out["left"], extra=MILESTONE)
+            found, failed, still_open = 0, False, set()
+            try:
+                found = broker.cancel_open_orders(symbols)
+            except Exception as e:
+                failed = True
+                log.warning("cancel open orders failed: %s", e)
+            try:
+                if not broker.wait_no_open_orders(symbols):
+                    still_open = set(broker.open_order_symbols(symbols))
+            except Exception as e:
+                log.warning("could not check open orders: %s", e)
+                still_open = set(symbols) if (found or failed) else set()
+            try:
+                held = retry(broker.signed_holdings, "positions after cancel")
+            except Exception as e:
+                out["problems"].append(f"positions unreadable before the long sell - nothing sent ({e})")
+                out["left"] = out["left"] or {p["ticker"]: p["qty"] for p in plan}
+                break
+            long_now = {t: q for t, q in held.items() if t in symbols and q > 0}
+            sells = [x for x in strategy.plan_long_exits(long_now, purpose) if x["ticker"] not in still_open]
+            out["left"] = long_now
+            if not sells:
+                if not long_now:
+                    break
+                continue
+            kind = first_kind if attempt == 0 else "market"
+            refs = broker.quotes([x["ticker"] for x in sells])
+            for x in sells:
+                x.update(ref_mid=refs.get(x["ticker"], {}).get("mid"), ref_last=refs.get(x["ticker"], {}).get("last"))
+            wait = first_wait if (attempt == 0 and first_wait) else config.OVERNIGHT_LONG_FILL_WAIT_SECONDS
+            if before_send and not out["sent"]:
+                before_send()
+            sent = send_long_orders(sells, kind, action, attempt, wait=wait)
+            out["sent"] += sent
+            long_record(run_id, sent)
+            try:
+                out["left"] = {t: q for t, q in retry(broker.signed_holdings, "positions").items()
+                               if t in symbols and q > 0}
+            except Exception as e:
+                log.warning("could not re-read positions after selling: %s", e)
+                out["left"] = {x["ticker"]: x["qty"] - (x.get("filled_qty") or 0) for x in sent
+                               if x.get("status") != "filled"}
+            if not out["left"]:
+                break
+    for x in out["sent"]:
+        if x.get("status") != "filled" and x["ticker"] in out["left"]:
+            out["problems"].append(f"long sell {x['ticker']} {x.get('status')}: {x.get('error') or ''}".strip())
+    return out
+
+
+def log_flip_fills(exit_sent: list[dict], short_sent: list[dict]) -> list[dict]:
+    """The flip names' fills against the opening print and the midpoint at send. Returns rows."""
+    names = sorted({x["ticker"] for x in exit_sent + short_sent})
+    if not names:
+        return []
+    try:
+        opens = broker.open_prints(names)
+    except Exception as e:
+        log.warning("open prints unavailable: %s", e)
+        opens = {}
+    rows = []
+    for x in exit_sent + short_sent:
+        fill = x.get("filled_avg_price")
+        if not fill:
+            continue
+        o, mid = opens.get(x["ticker"]), x.get("ref_mid")
+        bp = lambda ref: f"{1e4 * (fill / ref - 1):+.0f}bp" if ref else "-"
+        row = {"ticker": x["ticker"], "purpose": x.get("purpose"), "qty": x.get("filled_qty"), "fill": fill,
+               "open_print": o, "mid_at_send": mid}
+        rows.append(row)
+        log.info("  fill %s %s %g @ $%.2f | open print %s (%s) | mid at send %s (%s)", x.get("purpose"), x["ticker"],
+                 x.get("filled_qty") or 0, fill, f"${o:.2f}" if o else "-", bp(o), f"${mid:.2f}" if mid else "-",
+                 bp(mid), extra=MILESTONE)
+    return rows
+
+
+def open_long_exit(a, today: str, session, opened: dt.datetime) -> dict:
+    """09:30-09:31 T+1: sell the sleeve's longs before any short goes out. Returns exit_longs()."""
+    deadline = opened + dt.timedelta(minutes=config.OVERNIGHT_LONG_EXIT_DEADLINE_MINUTES_AFTER_OPEN)
+    state = load_picks(long_state_path())
+    run_id = (state or {}).get("run_id")
+    kind, first_wait = "market", None
+    opg_by = opened - dt.timedelta(minutes=config.OPG_CUTOFF_MINUTES_BEFORE_OPEN)
+    if config.OVERNIGHT_LONG_EXIT_ORDER == "opg" and dt.datetime.now(broker.ET) < opg_by and not a.now:
+        kind = "opg"
+        first_wait = (opened - dt.datetime.now(broker.ET)).total_seconds() + config.OVERNIGHT_LONG_FILL_WAIT_SECONDS
+    elif not a.now:
+        wait_until(opened + dt.timedelta(seconds=1), "long exit at the open")
+    out = exit_longs(run_id, a.execute, deadline, first_kind=kind, first_wait=first_wait,
+                     before_send=lambda: write_guard(today, [], OPEN_GUARD, status="started"))
+    for p in out["problems"]:
+        log.error("long exit problem: %s", p, extra={"step": "long_exit"})
+    if a.execute:
+        if out["sent"]:
+            write_guard(today, out["sent"], OPEN_GUARD, status="started")
+        if out["left"]:
+            alerts.raise_alert("long_exit_failed", f"{today}: still long after the open sell: {out['left']} - "
+                                                   f"no short on those names; sell by hand before "
+                                                   f"{deadline:%H:%M} ET", level="critical")
+        if state:
+            state.update(status="exited" if not out["left"] else "exit_incomplete", exited_at=utcnow().isoformat(),
+                         exit_orders=[{k: x.get(k) for k in ("ticker", "qty", "id", "status", "filled_qty",
+                                                             "filled_avg_price", "ref_mid")} for x in out["sent"]],
+                         left=out["left"])
+            save_picks(long_state_path(), state)
+    return out
+
+
+def enter_longs(a, today: str, run_id, trade_date, picks: list[dict] | None, cutoff: dt.datetime,
+                kind: str, exclude: set[str] | None = None, assume_flat: set[str] | None = None) -> dict:
+    """T 15:55 (MOC: 15:49): buy v2's picks for the overnight hold. Returns {"entries", "skips", "sent"}.
+    assume_flat: a dry run's planned covers, treated as done."""
+    db.set_step("long_entry")
+    out = {"entries": [], "skips": [], "sent": []}
+    if picks is None:
+        log.warning("long sleeve: no picks (scan failed or not finished) - no longs today")
+        return out
+    if config.OVERNIGHT_LONG_UNIVERSE != "v2_picks":
+        log.error("long sleeve: OVERNIGHT_LONG_UNIVERSE=%r is not built - no longs", config.OVERNIGHT_LONG_UNIVERSE)
+        return out
+    if a.execute and dt.datetime.now(broker.ET) > cutoff:
+        log.error("long sleeve: past the %s ET cutoff - no longs today", f"{cutoff:%H:%M}")
+        return out
+    acct = broker.account()
+    halted = risk.halted_today(today)
+    day_loss, drawdown = strategy.halt_reason(acct, risk.update_peak(acct["equity"]))
+    if halted or day_loss or drawdown:
+        log.warning("long sleeve: halted (%s) - no longs today", halted or day_loss or drawdown, extra=MILESTONE)
+        out["skips"] = [{"ticker": p["ticker"], "reason": "halted"} for p in picks]
+        return out
+    held = {t: q for t, q in retry(broker.signed_holdings, "positions").items() if t not in (assume_flat or ())}
+    long_pct = sum(abs(p["market_value"]) for p in broker.positions() if p["qty"] > 0) / acct["equity"] * 100
+    quotes = broker.quotes([p["ticker"] for p in picks]) if picks else {}
+    entries, skips = strategy.plan_long_entries(picks, quotes, held, acct["equity"], long_pct, kind, exclude)
+    out.update(entries=entries, skips=skips)
+    log.info("long sleeve (%s): %d of %d picks, %.1f%% long gross already open", kind, len(entries), len(picks),
+             long_pct, extra=MILESTONE)
+    for x in skips:
+        log.info("  long skip %s: %s", x["ticker"], x["reason"], extra=MILESTONE)
+    for e in entries:
+        log.info("  plan BUY %s %d @ ~$%.2f (%.1f%%)%s", e["ticker"], e["qty"], e["price"], e["target_pct"],
+                 f", limit ${e['limit_price']:.2f}" if e.get("limit_price") else "", extra=MILESTONE)
+    state = {"entry_date": today, "exit_date": trade_date and str(trade_date), "run_id": run_id, "kind": kind,
+             "saved_at": utcnow().isoformat(), "equity": acct["equity"], "skips": skips}
+    if not a.execute:
+        log.info("DRY RUN - no long orders sent. Long gross would be %.1f%% of $%.2f.",
+                 long_pct + sum(e["target_pct"] for e in entries), acct["equity"], extra=MILESTONE)
+        save_picks(long_state_path(False), {**state, "status": "dry_run", "orders": entries})
+        return out
+    if not entries:
+        return out
+    save_picks(long_state_path(), {**state, "status": "started", "orders": entries})
+    wait = config.OVERNIGHT_LONG_FILL_WAIT_SECONDS if kind == "limit" else None
+    sent = send_long_orders(entries, kind, "buy", wait=wait)
+    out["sent"] = sent
+    long_record(run_id, sent)
+    save_picks(long_state_path(), {**state, "status": "entered", "orders": [
+        {k: x.get(k) for k in ("ticker", "qty", "id", "status", "filled_qty", "filled_avg_price", "limit_price",
+                               "ref_mid", "error")} for x in sent]})
+    bad = [x for x in sent if x.get("status") == "rejected"]
+    if bad:
+        alerts.raise_alert("long_entry_failed", f"{today}: long buys rejected: "
+                                                f"{', '.join(x['ticker'] + ' ' + (x.get('error') or '') for x in bad)}"[:900])
+    return out
+
+
 # ---------------------------------------------------------------- v2: short_intraday, 15:40 job
 def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None,
               purpose: str = "cover") -> dict:
@@ -521,6 +800,7 @@ def close_intraday(a, today: str, mode: str) -> int:
                 if not ranked:
                     raise RuntimeError("TradingView returned no gainers")
                 picks = strategy.select(ranked, acct["equity"])
+                log_etb(ranked, today, a.execute)
                 record_candidates(run_id, ranked)
                 print_board(ranked)
                 with lock:
@@ -541,12 +821,27 @@ def close_intraday(a, today: str, mode: str) -> int:
         t_scan.start()
         scan_deadline = time.time() + config.SCAN_TIMEOUT_SECONDS
 
+        entered = [e["ticker"] for e in (prev or {}).get("entered") or []] if prev_run_id else []
+        long_out = None
+        long_kind = config.OVERNIGHT_LONG_ENTRY_ORDER
+        if config.OVERNIGHT_LONG_ENABLED and long_kind == "moc":
+            # MOC must be in by 15:50, so it can't wait for the 15:55 cover: wait for the scan until 15:49:30
+            moc_by = close - dt.timedelta(minutes=config.MOC_CUTOFF_MINUTES_BEFORE_CLOSE, seconds=30)
+            while t_scan.is_alive() and (a.now or dt.datetime.now(broker.ET) < moc_by) and time.time() < scan_deadline:
+                t_scan.join(timeout=5.0)
+            with lock:
+                picks_now = scan_box.get("picks")
+            held_now = retry(broker.signed_holdings, "positions")
+            if a.execute:
+                write_guard(today, [], status="started")
+            long_out = enter_longs(a, today, run_id, trade_date, picks_now, moc_by if not a.now else close, "moc",
+                                   exclude=set(entered) | {t for t, q in held_now.items() if q})
+
         # 15:55: cover, whatever the scan is doing
         if not a.now:
             while t_scan.is_alive() and dt.datetime.now(broker.ET) < trade_at:
                 t_scan.join(timeout=max(0.0, min(5.0, (trade_at - dt.datetime.now(broker.ET)).total_seconds())))
             wait_until(trade_at, "cover")
-        entered = [e["ticker"] for e in (prev or {}).get("entered") or []] if prev_run_id else []
         if a.execute:
             write_guard(today, [], status="started")
         cover = cover_all(prev_run_id or run_id, a.execute, cutoff if not a.now else close, entered)
@@ -567,6 +862,18 @@ def close_intraday(a, today: str, mode: str) -> int:
                 scan_box["error"] = RuntimeError(f"scan still running after {config.SCAN_TIMEOUT_SECONDS}s")
                 log.error("scan timed out - no picks saved for %s", trade_date)
 
+        # 15:55 overnight long sleeve, after the cover-all (cover_all only ever buys back shorts)
+        if config.OVERNIGHT_LONG_ENABLED and long_kind != "moc":
+            try:
+                long_out = enter_longs(a, today, run_id, trade_date, scan_box.get("picks"),
+                                       cutoff if not a.now else close, long_kind,
+                                       assume_flat=None if a.execute else {c["ticker"] for c in cover["planned"]})
+            except Exception as e:
+                log.error("long sleeve entry failed: %s\n%s", e, traceback.format_exc(), extra={"step": "long_entry"})
+                alerts.raise_alert("long_entry_failed", f"{today}: long sleeve entry failed: {e}", level="critical")
+        if a.execute and long_out and long_out["sent"]:
+            write_guard(today, cover["sent"] + long_out["sent"])
+
         # exit row: the run whose picks were traded today
         n_cover_bad = len(cover["problems"])
         exit_status = "exited_with_errors" if n_cover_bad or cover["left"] else "exited"
@@ -582,6 +889,10 @@ def close_intraday(a, today: str, mode: str) -> int:
             msg.append(f"{'covered' if a.execute else 'would cover'} {len(cover['planned'])} shorts "
                        f"not from a v2 pick (handover)")
         msg += cover["problems"] if not prev_run_id else []
+        if long_out and (long_out["entries"] or long_out["skips"]):
+            msg.append(f"long sleeve: {'bought' if a.execute else 'would buy'} "
+                       f"{len(long_out['sent'] if a.execute else long_out['entries'])}, "
+                       f"skipped {len(long_out['skips'])}")
         if "error" in scan_box:
             alerts.raise_alert("scan_failed", f"{today}: {scan_box['error']} - nothing to short at the next open",
                                level="warning")
@@ -651,7 +962,8 @@ def place_stops(run_id, sent: list[dict], entries: list[dict]) -> list[dict]:
 
 
 def halt_and_flatten(today: str, reason: str, run_id, session) -> str:
-    """Daily loss halt: write logs/halt.json, alert, cover every short (stops cancelled first)."""
+    """Daily loss halt: write logs/halt.json, alert, cover every short (stops cancelled first).
+    With the long sleeve on (or holding longs), every long is sold too."""
     risk.set_halt(today, reason)
     alerts.raise_alert("daily_loss_halt", f"{today}: {reason} - flattening, no new entries today", level="critical")
     close = session[1] if session else dt.datetime.now(broker.ET) + dt.timedelta(hours=1)
@@ -663,6 +975,19 @@ def halt_and_flatten(today: str, reason: str, run_id, session) -> str:
         return reason
     if out["left"]:
         alerts.raise_alert("cover_failed", f"halt flatten left shorts open: {out['left']}", level="critical")
+    if long_sleeve_active():
+        try:
+            lo = exit_longs(run_id, True, close - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE),
+                            purpose="flatten_long", action="flatten")
+        except LockBusy as e:
+            alerts.raise_alert("long_exit_failed", f"halt flatten of longs not run: {e}", level="critical")
+            return reason
+        if lo["left"]:
+            alerts.raise_alert("long_exit_failed", f"halt flatten left longs open: {lo['left']}", level="critical")
+        state = load_picks(long_state_path())
+        if state and lo["sent"] and not lo["left"]:
+            state.update(status="flattened", exited_at=utcnow().isoformat())
+            save_picks(long_state_path(), state)
     return reason
 
 
@@ -682,6 +1007,9 @@ def open_intraday(a, today: str, mode: str) -> int:
         if a.execute and guard_blocks(today, OPEN_GUARD) and not a.force:
             log.error("already entered today - use --force to run again")
             return 1
+
+        # overnight long sleeve: sell the longs at the open, before anything else can return early
+        long_exit = open_long_exit(a, today, session, opened) if long_sleeve_active() else None
 
         path = a.picks or (config.PICKS_FILE if a.execute or not os.path.exists(DRY_PICKS_FILE) else DRY_PICKS_FILE)
         data = load_picks(path)
@@ -751,6 +1079,9 @@ def open_intraday(a, today: str, mode: str) -> int:
 
         positions = broker.positions()
         held = {p["ticker"]: int(round(p["qty"])) for p in positions}
+        sleeve_longs = set(long_exit["left"]) | {x["ticker"] for x in long_exit["planned"]} if long_exit else set()
+        if long_exit and not a.execute:           # dry run: the longs would be sold first, then shorted
+            held = {t: q for t, q in held.items() if not (q > 0 and t in sleeve_longs)}
         existing = sum(abs(p["market_value"]) for p in positions if p["qty"] < 0) / acct["equity"] * 100
         leftover = {t: q for t, q in held.items() if q < 0}
         if leftover:
@@ -759,7 +1090,8 @@ def open_intraday(a, today: str, mode: str) -> int:
         tickers = [p["ticker"] for p in picks]
         borrow = broker.borrow(tickers)
         prices = broker.last_prices(tickers, today_only=session is not None and dt.datetime.now(broker.ET) >= opened)
-        entries, skips = strategy.recheck_at_open(picks, borrow, prices, held, acct["equity"], existing)
+        entries, skips = strategy.recheck_at_open(picks, borrow, prices, held, acct["equity"], existing,
+                                                  sleeve_longs=sleeve_longs)
         # PDT: never open more shorts than can be covered today without breaking 3-in-5
         capped = pdt_on and acct["equity"] < config.PDT_MIN_EQUITY
         n_day_trades = broker.day_trade_count() if capped else None
@@ -789,11 +1121,17 @@ def open_intraday(a, today: str, mode: str) -> int:
             db.events.flush_to(run_id)
             return 0
 
+        flips = sorted({x["ticker"] for x in long_exit["sent"]}) if long_exit else []
+        mids = broker.quotes(flips) if flips else {}     # midpoints at send, for the flip fill log
         write_guard(today, [], OPEN_GUARD, status="started")
         sent, pdt = send_orders(entries, wait=config.FILL_WAIT_SECONDS if config.BROKER_STOP_PCT else None)
         record_orders(run_id, sent)
         write_guard(today, sent, OPEN_GUARD)
         stops = place_stops(run_id, sent, entries) if config.BROKER_STOP_PCT else []
+        if flips:
+            log_flip_fills(long_exit["sent"], [{**x, "ref_mid": mids.get(x["ticker"], {}).get("mid")}
+                                               for x in sent if x["ticker"] in flips])
+            write_guard(today, long_exit["sent"] + sent, OPEN_GUARD)
         if pdt:
             alerts.raise_alert("pdt_block", f"{today}: {pdt} - remaining entries skipped", level="warning")
         bad = [s for s in sent if s.get("status") in ("rejected", "canceled", "expired")]
