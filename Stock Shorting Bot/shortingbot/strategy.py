@@ -75,12 +75,15 @@ def plan_cover(held: dict[str, float], purpose: str = "cover") -> list[dict]:
 
 def recheck_at_open(picks: list[dict], borrow: dict[str, dict], prices: dict[str, float | None],
                     held: dict[str, int], equity: float,
-                    existing_gross_pct: float = 0.0) -> tuple[list[dict], list[dict]]:
+                    existing_gross_pct: float = 0.0,
+                    sleeve_longs: set[str] | None = None) -> tuple[list[dict], list[dict]]:
     """Re-check yesterday's saved picks at the open and size the entries.
 
     Returns (entries, skips). A pick is skipped when it is no longer shortable / easy to
     borrow, has no price, trades under MIN_PRICE_AT_SCAN, gapped up more than MAX_GAP_UP_PCT
-    over its scan price, or is already held. Entries are sized on today's price and equity,
+    over its scan price, or is already held. A name the overnight long sleeve bought is sold
+    before this runs, so it arrives flat and is shorted; one in `sleeve_longs` still long (the
+    sell did not fill) is skipped, and so is any name already held short. Entries are sized on today's price and equity,
     equal SIZE_PCT each, and gross short (existing shorts included) stays under MAX_GROSS_PCT.
     """
     entries, skips = [], []
@@ -99,6 +102,8 @@ def recheck_at_open(picks: list[dict], borrow: dict[str, dict], prices: dict[str
             why = f"open price ${px:.2f} below ${config.MIN_PRICE_AT_SCAN:g}"
         elif scan_px and 100 * (px / scan_px - 1) > config.MAX_GAP_UP_PCT:
             why = f"gapped up {100 * (px / scan_px - 1):.0f}% over scan price ${scan_px:.2f}"
+        elif held.get(t) and held[t] > 0 and t in (sleeve_longs or ()):
+            why = f"overnight long not sold yet ({held[t]}) - no short until it is flat"
         elif held.get(t):
             why = f"already held ({held[t]})"
         if why is None:
@@ -113,6 +118,78 @@ def recheck_at_open(picks: list[dict], borrow: dict[str, dict], prices: dict[str
         if why:
             skips.append({"ticker": t, "reason": why})
     return entries, skips
+
+
+# ---------------------------------------------------------------- overnight long sleeve
+def news_hit(r: dict, terms: list[str] | None = None) -> str | None:
+    """The first OVERNIGHT_LONG_SKIP_IF_NEWS term found in the news classifier's label or the
+    headlines (case-insensitive), or None."""
+    terms = config.OVERNIGHT_LONG_SKIP_IF_NEWS if terms is None else terms
+    heads = r.get("headlines") or []
+    text = " ".join([str(r.get("catalyst") or "")] +
+                    [h if isinstance(h, str) else f"{h.get('title', '')} {h.get('summary', '')}" for h in heads]).lower()
+    for term in terms:
+        if term.lower() in text:
+            return term
+    return None
+
+
+def long_limit_price(q: dict) -> float | None:
+    """Marketable limit for a long entry: ask x (1 + OVERNIGHT_LONG_LIMIT_PCT/100), the last
+    trade when there is no ask. None with neither."""
+    ref = q.get("ask") or q.get("last")
+    return round(ref * (1 + config.OVERNIGHT_LONG_LIMIT_PCT / 100), 2) if ref else None
+
+
+def plan_long_entries(picks: list[dict], quotes: dict[str, dict], held: dict[str, float], equity: float,
+                      existing_long_pct: float = 0.0, kind: str = "limit",
+                      exclude: set[str] | None = None) -> tuple[list[dict], list[dict]]:
+    """The 15:55 buys: v2's picks in rank order. Returns (entries, skips).
+
+    Skipped: held in either direction (a buy would cover a short that is still open), in
+    `exclude`, dilution / offering news, no quote, price under MIN_PRICE_FOR_ANY_TRADE, or
+    over the OVERNIGHT_LONG_MAX_GROSS cap (open longs included). Each entry is
+    OVERNIGHT_LONG_SIZE_PCT of equity at the reference price (the ask, else the last trade)."""
+    entries, skips, gross = [], [], existing_long_pct
+    for p in picks:
+        t = p["ticker"]
+        q = quotes.get(t) or {}
+        ref = (q.get("ask") or q.get("last")) if kind == "limit" else (q.get("last") or q.get("mid"))
+        why, hit = None, news_hit(p)
+        if held.get(t, 0) < 0:
+            why = f"still short ({held[t]}) after the cover"
+        elif held.get(t, 0) > 0:
+            why = f"already long ({held[t]})"
+        elif t in (exclude or ()):
+            why = "entered as a short today (MOC goes before the 15:55 cover)"
+        elif hit:
+            why = f"news: {hit!r} (catalyst {p.get('catalyst')})"
+        elif not ref:
+            why = "no quote"
+        elif config.MIN_PRICE_FOR_ANY_TRADE and ref < config.MIN_PRICE_FOR_ANY_TRADE:
+            why = f"price ${ref:.2f} below ${config.MIN_PRICE_FOR_ANY_TRADE:g}"
+        if why is None:
+            pct = min(config.OVERNIGHT_LONG_SIZE_PCT, config.OVERNIGHT_LONG_MAX_GROSS - gross)
+            qty = math.floor(equity * pct / 100 / ref) if pct > 0 else 0
+            if qty < 1:
+                why = "long gross cap reached" if pct <= 0 else "position too small for one share"
+            else:
+                gross += qty * ref / equity * 100
+                e = {"ticker": t, "side": "buy", "qty": qty, "purpose": "long_entry", "price": ref,
+                     "target_pct": round(qty * ref / equity * 100, 2), "ref_mid": q.get("mid"),
+                     "ref_last": q.get("last")}
+                if kind == "limit":
+                    e["limit_price"] = long_limit_price(q)
+                entries.append(e)
+        if why:
+            skips.append({"ticker": t, "reason": why})
+    return entries, skips
+
+
+def plan_long_exits(held: dict[str, float], purpose: str = "long_exit") -> list[dict]:
+    """Sell every long, exactly what is held. Shorts are never touched."""
+    return [{"ticker": t, "side": "sell", "qty": q, "purpose": purpose}
+            for t, q in sorted(held.items()) if q > 0]
 
 
 def pdt_applies(acct: dict, detected: bool = False) -> bool:

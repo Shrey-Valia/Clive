@@ -66,6 +66,40 @@ ENTRY_MINUTES_AFTER_OPEN = 1     # short at 09:31
 ENTRY_CUTOFF_MINUTES_AFTER_OPEN = 20   # a late start (Mac asleep) enters nothing after 09:50
 MAX_GAP_UP_PCT = 40.0            # skip a pick that opens more than this % above its scan price
 
+# ---------------------------------------------------------------- overnight long sleeve (off)
+# Penny Research "LS1 flip": buy v2's own picks at T 15:55 (after the cover-all), sell them at
+# the T+1 open, then the 09:31 v2 short of the same names goes ahead. OOS 2022-2026 with v2:
+# Sharpe 1.25, CAGR 16.4%, max DD -11.1% (v2 alone 1.21 / 10.7% / -8.3%). The long leg alone has
+# a median trade of ~0 and a +2.1 skew; its worst overnight gap was -71%.
+# The real environment can force it on for a dry run: SHORTBOT_OVERNIGHT_LONG=1 (.env cannot,
+# it is read after this module). To run it for real, set the default below to True.
+OVERNIGHT_LONG_ENABLED = os.environ.get("SHORTBOT_OVERNIGHT_LONG", "").strip().lower() in ("1", "true", "yes")
+OVERNIGHT_LONG_UNIVERSE = "v2_picks"     # exactly the names saved to next_open_picks.json at 15:45
+OVERNIGHT_LONG_SIZE_PCT = 5.0            # % of equity per name
+OVERNIGHT_LONG_MAX_GROSS = 25.0          # total long notional cap, % of equity (open longs included)
+MIN_PRICE_FOR_ANY_TRADE = 10.0           # a long is skipped below this price at entry
+OVERNIGHT_LONG_SKIP_IF_NEWS = ["dilution", "offering", "pricing", "424B", "S-3"]   # vs catalyst + headlines
+# Entry: "limit" = DAY limit at ask x (1 + OVERNIGHT_LONG_LIMIT_PCT/100), sent at 15:55 after the
+# cover-all; whatever is unfilled at the close expires. "moc" = market-on-close sent right after
+# the scan: Alpaca rejects MOC orders after 15:50, so it cannot wait for the 15:55 cover, and any
+# pick held (either side) or entered as a short today is skipped.
+OVERNIGHT_LONG_ENTRY_ORDER = "limit"
+OVERNIGHT_LONG_LIMIT_PCT = 0.5
+MOC_CUTOFF_MINUTES_BEFORE_CLOSE = 10     # Alpaca: no MOC orders after 15:50
+# Exit at T+1: "market" = DAY market sell as soon as the --open job runs with the market open
+# (the 09:31 cron line). "opg" = market-on-open; it only works when the --open job starts before
+# 09:28 (move its cron line to 09:20). Later than that it falls back to "market".
+OVERNIGHT_LONG_EXIT_ORDER = "market"
+OPG_CUTOFF_MINUTES_BEFORE_OPEN = 2       # Alpaca: no OPG orders after 09:28
+OVERNIGHT_LONG_FILL_WAIT_SECONDS = 30    # wait for each sell pass before re-reading positions
+OVERNIGHT_LONG_EXIT_EXTRA_PASSES = 2     # longs still open after the first sell: cancel, re-read, re-sell
+OVERNIGHT_LONG_EXIT_DEADLINE_MINUTES_AFTER_OPEN = 20   # 09:50: a long still open then is a critical alert
+OVERNIGHT_LONG_ALERT_LOSS_PCT = 25.0     # monitor.py: a long down this much
+
+# ETB history for research: every scanned name's Alpaca flags, appended after each 15:45 scan
+# of an executed run (dry runs write etb_history.dry_run.csv). In LOG_DIR.
+ETB_HISTORY_FILE = "etb_history.csv"
+
 # Pattern day trader rule. FINRA retired it (Rule 4210 amendments, effective 2026-06-04) and
 # Alpaca replaced it with intraday margin; the paper account no longer reports
 # pattern_day_trader / daytrade_count / daytrading_buying_power. Each v2 round trip is a day

@@ -40,7 +40,9 @@ class FakeBroker:
         self.cancelled = 0
         self.open_orders: list[dict] = []         # resting stops
         self.day_trades: int | None = 0           # what broker.day_trade_count() answers
-        self.client_ids: list[str | None] = []    # client_order_id of every submit / submit_stop
+        self.client_ids: list[str | None] = []    # client_order_id of every submit / submit_stop / submit_long
+        self.long_mode: dict[str, object] = {}    # ticker -> "rest" (no fill yet) or ("partial", n), next submit_long only
+        self.quote_map: dict[str, dict] = {}      # overrides quotes(); default ask = last = prices[t]
 
     # --- the broker API daily.py / monitor.py use
     def account(self):
@@ -133,6 +135,56 @@ class FakeBroker:
         self.orders.append(o)
         return dict(o)
 
+    def submit_long(self, ticker, qty, side, kind, limit_price=None, client_order_id=None):
+        """The long sleeve's orders. Fills at once at `prices` unless long_mode says otherwise or a
+        limit is under the price; what doesn't fill rests in open_orders."""
+        self.events.append(("long", side, kind, ticker, qty))
+        self.client_ids.append(client_order_id)
+        if ticker in self.reject:
+            raise RuntimeError(self.reject[ticker])
+        px = self.prices.get(ticker) or self.pos.get(ticker, {}).get("price") or 10.0
+        mode = self.long_mode.pop(ticker, None)
+        fill = qty
+        if mode == "rest" or (kind == "limit" and limit_price is not None and px > limit_price):
+            fill = 0
+        elif isinstance(mode, tuple):
+            fill = mode[1]
+        if fill:
+            self._apply(ticker, fill if side == "buy" else -fill, px)
+        status = "filled" if fill == qty else ("partially_filled" if fill else "new")
+        o = {"id": f"o{len(self.orders) + 1}", "ticker": ticker, "side": side, "qty": float(qty), "status": status,
+             "submitted_at": None, "filled_qty": float(fill), "filled_avg_price": px if fill else None,
+             "filled_at": None, "kind": kind, "limit_price": limit_price}
+        self.orders.append(o)
+        if status != "filled":
+            self.open_orders.append(o)
+        return dict(o)
+
+    def _apply(self, ticker, signed, px):
+        p = self.pos.setdefault(ticker, {"qty": 0, "entry": px, "price": px})
+        p["qty"] += signed
+        if p["qty"] == 0:
+            del self.pos[ticker]
+
+    def fill_resting(self, ticker):
+        """A resting long-sleeve order fills in full (a late fill)."""
+        o = next(o for o in self.open_orders if o["ticker"] == ticker)
+        self.open_orders.remove(o)
+        rest = o["qty"] - o["filled_qty"]
+        px = self.prices.get(ticker) or 10.0
+        self._apply(ticker, rest if o["side"] == "buy" else -rest, px)
+        o.update(status="filled", filled_qty=o["qty"], filled_avg_price=px)
+
+    def quotes(self, tickers):
+        out = {}
+        for t in tickers:
+            px = self.prices.get(t)
+            out[t] = self.quote_map.get(t) or {"bid": px and px - 0.02, "ask": px, "mid": px and px - 0.01, "last": px}
+        return out
+
+    def open_prints(self, tickers):
+        return {t: self.prices.get(t) for t in tickers}
+
     def refresh(self, ids):
         return [dict(o) for o in self.orders if o["id"] in ids]
 
@@ -198,6 +250,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(daily.time, "sleep", lambda s: None)
     monkeypatch.setattr(daily, "code_version", lambda: "test")
     monkeypatch.setattr(daily, "ORDER_ID_SUFFIX", "")
+    monkeypatch.setattr(config, "OVERNIGHT_LONG_ENABLED", False)   # a SHORTBOT_OVERNIGHT_LONG=1 shell can't leak in
 
     def no_network(*a, **k):
         raise AssertionError("network call in an offline test")
@@ -214,7 +267,8 @@ def _real_logs() -> dict:
     d = os.path.join(ROOT, "logs")
     out = {}
     for name in ("last_execute.json", "last_open.json", "next_open_picks.json", "next_open_picks.dry_run.json",
-                 "alerts_state.json", "equity_peak.json", "halt.json"):
+                 "alerts_state.json", "equity_peak.json", "halt.json", "overnight_longs.json",
+                 "overnight_longs.dry_run.json", "etb_history.csv", "etb_history.dry_run.csv"):
         p = os.path.join(d, name)
         out[name] = open(p).read() if os.path.exists(p) else None
     return out
@@ -225,7 +279,8 @@ def fake(monkeypatch):
     fb = FakeBroker()
     for name in ("account", "positions", "signed_holdings", "borrow", "adv20", "last_prices",
                  "session_today", "next_session", "cancel_open_orders", "submit", "refresh", "wait_filled",
-                 "wait_no_open_orders", "open_order_symbols", "day_trade_count", "submit_stop"):
+                 "wait_no_open_orders", "open_order_symbols", "day_trade_count", "submit_stop",
+                 "submit_long", "quotes", "open_prints"):
         monkeypatch.setattr(broker, name, getattr(fb, name))
     return fb
 
