@@ -10,12 +10,24 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import requests
+
+# macOS: a forked worker that lets requests/urllib consult the system proxy configuration
+# (_scproxy -> SystemConfiguration/ObjC, not fork-safe) segfaults on its first request
+# (tuning/spreads/BUGS.md #5). When no proxy is configured through the environment, pin
+# urllib to the environment path with no_proxy=*. Opt out: OPTIONSBOT_KEEP_SYSTEM_PROXY=1.
+PROXY_ENV_VARS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+if sys.platform == "darwin" and not os.environ.get("OPTIONSBOT_KEEP_SYSTEM_PROXY") \
+        and not any(os.environ.get(k) for k in PROXY_ENV_VARS):
+    os.environ["no_proxy"] = "*"
+    os.environ["NO_PROXY"] = "*"
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache"
@@ -238,6 +250,17 @@ class AlpacaData:
                 result[s] = _bars_to_series(slim)
         return result
 
+    def option_bar_frames(self, symbols: list[str], start: str, end: str) -> dict[str, pd.DataFrame]:
+        """Like option_bars but returns DataFrame[close, volume] per symbol (same
+        cache; fetches whatever option_bars would fetch)."""
+        self.option_bars(symbols, start, end)
+        out = {}
+        for s in symbols:
+            p = self._cache_path("optbars", f"{s}|{start}|{end}")
+            if p.exists():
+                out[s] = _bars_to_frame(json.loads(p.read_text()))
+        return out
+
 
 def _atomic_write(path: Path, text: str):
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
@@ -245,11 +268,22 @@ def _atomic_write(path: Path, text: str):
     os.replace(tmp, path)
 
 
-def _bars_to_series(bars: list) -> pd.Series:
+def _bars_to_series(bars: list, field: str = "c") -> pd.Series:
+    """Daily series of one bar field ('c' close, default; 'v' volume)."""
     if not bars:
         return pd.Series(dtype=float)
     idx = pd.to_datetime([b["t"][:10] for b in bars])
-    return pd.Series([float(b["c"]) for b in bars], index=idx).sort_index()
+    return pd.Series([float(b.get(field, 0) or 0) for b in bars], index=idx).sort_index()
+
+
+def _bars_to_frame(bars: list) -> pd.DataFrame:
+    """DataFrame[close, volume] indexed by date (volume 0 when not cached)."""
+    if not bars:
+        return pd.DataFrame(columns=["close", "volume"], dtype=float)
+    idx = pd.to_datetime([b["t"][:10] for b in bars])
+    df = pd.DataFrame({"close": [float(b["c"]) for b in bars],
+                       "volume": [float(b.get("v", 0) or 0) for b in bars]}, index=idx)
+    return df.sort_index()
 
 
 def parse_occ(sym: str):

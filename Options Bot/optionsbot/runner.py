@@ -6,6 +6,10 @@
     res["SPY"]["metrics"]["sharpe"]; res["SPY"]["equity"]  # DataFrame
 
 Deterministic: same inputs + same cache -> identical outputs.
+
+Engine options pass through **engine_kw, e.g. run_one(..., signal_lag=1) fills
+every strategy decision at the next close, share_rows=True adds share-holding
+rows to the trade log (see optionsbot/engine.py docstring).
 """
 from __future__ import annotations
 
@@ -76,6 +80,11 @@ def summarize(ef: pd.DataFrame, tr: pd.DataFrame, eng: Engine | None = None) -> 
                     "n_theo_selections": eng.m.n_theo, "n_early_assign": eng.n_early_assign,
                     "infeasible": eng.infeasible, "blocked_days": eng.blocked_days,
                     "kill_events": eng.kill_events})
+        if eng.share_lots or eng._lot is not None:
+            # trade stats incl. share-holding episodes (tuning/wheel/BUGS.md #2); the flat
+            # n_trades / win_rate / profit_factor above stay option-leg-only unless the
+            # engine ran with share_rows=True
+            met["trade_stats_with_shares"] = M.trade_metrics(eng.trades_frame(include_shares=True))
     return met
 
 

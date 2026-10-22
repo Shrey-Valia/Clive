@@ -57,13 +57,14 @@ def trade_metrics(trades: pd.DataFrame) -> dict:
         return {"n_trades": 0, "n_open_at_end": int(len(trades))}
     pnl = t["pnl"]
     wins, losses = pnl[pnl > 0], pnl[pnl <= 0]
-    pf = wins.sum() / -losses.sum() if losses.sum() < 0 else float("inf")
+    # no losing trade -> profit factor undefined: None (JSON-safe) instead of inf
+    pf = float(wins.sum() / -losses.sum()) if losses.sum() < 0 else None
     return {
         "n_trades": int(len(t)),
         "win_rate": float(len(wins) / len(t)),
         "avg_win": float(wins.mean()) if len(wins) else 0.0,
         "avg_loss": float(losses.mean()) if len(losses) else 0.0,
-        "profit_factor": float(pf),
+        "profit_factor": pf,
         "worst_trade": float(pnl.min()),
         "best_trade": float(pnl.max()),
         "total_trade_pnl": float(pnl.sum()),

@@ -21,10 +21,36 @@ Key mechanics
 * Capital: cash-secured. Each position reserves cash (CSP: strike*100*n,
   vertical: width*100*n, uncovered short call: not allowed). New positions
   must fit into free cash = cash - reserved.
+
+Engine options added by tuning/engine_fixes (defaults keep published numbers)
+-----------------------------------------------------------------------------
+* signal_lag (int, default 0): 0 = fill at the close that produced the
+  decision (legacy). 1 = every eng.open / eng.close a strategy issues on day d
+  is queued and filled at the close of the next trading day, re-priced at that
+  day's print (or the model mark when the contract did not print). Sizing is
+  the one decided on day d; the cash check is repeated at the fill. Share
+  trades (buy_shares/sell_shares) are NOT delayed.
+* share_rows (bool, default False): trades_frame() also returns one row per
+  share holding episode (kind "shares": from 0 shares back to 0), so trade
+  stats of physical-settlement strategies include the share P&L. Assigned or
+  called-away shares are booked at the underlying price at assignment, which
+  is consistent with the option row booking intrinsic. Option rows + share
+  rows + interest reconcile exactly with the equity curve. trades_frame(
+  include_shares=True) gives the same rows regardless of the flag.
+* Market.is_monthly: a Thursday counts as a monthly expiry only when the 3rd
+  Friday after it is an exchange holiday (Good Friday, Juneteenth). The old
+  rule (any Thursday on the 14th-20th) is kept as is_monthly(e, legacy=True)
+  or globally with engine.LEGACY_MONTHLY = True. NOTE: this changes the
+  expiry ranking (Thursday dailies were treated as monthlies) and so can move
+  published numbers; see tuning/engine_fixes/impact.csv.
+* Market.bars caches unexpired contracts under end = min(expiry,
+  max(market end, DATA_END)), so the cache key no longer depends on the end
+  date passed to runner.market() (for any end <= DATA_END).
 """
 from __future__ import annotations
 
 import math
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -34,6 +60,39 @@ import pandas as pd
 from . import pricing as px
 
 DATA_START = pd.Timestamp("2024-01-01")
+# last date the option-bar cache was collected through; unexpired contracts are cached under
+# min(expiry, max(market end, DATA_END)) so the key does not depend on the Market end date.
+DATA_END = os.environ.get("OPTIONSBOT_DATA_END", "2026-10-20")
+LEGACY_MONTHLY = False     # True restores the pre-fix is_monthly rule (any Thursday 14th-20th)
+
+
+def _easter(y: int) -> pd.Timestamp:
+    """Gregorian Easter Sunday (anonymous algorithm)."""
+    a, b, c = y % 19, y // 100, y % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l_) // 451
+    month = (h + l_ - 7 * m + 114) // 31
+    day = (h + l_ - 7 * m + 114) % 31 + 1
+    return pd.Timestamp(y, month, day)
+
+
+def is_exchange_holiday_friday(f: pd.Timestamp) -> bool:
+    """NYSE holidays that can fall on a 3rd Friday: Good Friday and Juneteenth
+    (observed; from 2022). Other fixed holidays cannot land on the 15th-21st."""
+    f = pd.Timestamp(f).normalize()
+    if f.weekday() != 4:
+        return False
+    if f == _easter(f.year) - pd.Timedelta(days=2):
+        return True
+    if f.year >= 2022 and f.month == 6 and f.day in (18, 19):
+        # June 19 on a Friday, or June 18 (Friday) observed for a Saturday June 19
+        return f.day == 19 or (f + pd.Timedelta(days=1)).day == 19
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +169,27 @@ class Position:
 
     def min_dte(self, d) -> int:
         return min((l.expiry - d).days for l in self.legs if l.open)
+
+    def max_loss(self) -> float | None:
+        """Structural max loss ($, >= 0) of a position with long protection:
+        -(entry cash + worst expiry payoff over all underlying prices). None when
+        the position has no long leg or the loss is unbounded (net short calls).
+        Uses meta['max_loss'] when the strategy recorded it at entry. Legs with
+        different expiries are treated as if they expired together."""
+        if "max_loss" in self.meta:
+            return float(self.meta["max_loss"])
+        if not any(l.qty > 0 for l in self.legs):
+            return None
+        net_calls = sum(l.qty for l in self.legs if l.cp == "C")
+        if net_calls < 0:
+            return None
+        pts = [0.0] + sorted({l.strike for l in self.legs})
+
+        def payoff(S):
+            return sum(l.qty * 100 * (max(0.0, S - l.strike) if l.cp == "C" else max(0.0, l.strike - S))
+                       for l in self.legs)
+        worst = min(payoff(x) for x in pts)
+        return max(0.0, -(self.entry_cash + worst))
 
 
 def load_vix(cache_dir):
@@ -248,17 +328,38 @@ class Market:
             rv = 0.25
         return float(min(max(rv * 1.15, 0.10), 1.5))
 
-    def bars(self, symbols, exp) -> dict:
+    def _bars_window(self, exp):
         start = max(DATA_START, exp - pd.Timedelta(days=450)).strftime("%Y-%m-%d")
-        end = min(exp, self.end).strftime("%Y-%m-%d")
+        # key must not depend on the Market end (tuning/events/BUGS.md #3): expired contracts
+        # use their expiry; unexpired ones the data horizon (or a later Market end)
+        end = min(exp, max(self.end, pd.Timestamp(DATA_END))).strftime("%Y-%m-%d")
+        return start, end
+
+    def bars(self, symbols, exp) -> dict:
+        start, end = self._bars_window(exp)
         got = self.client.option_bars(list(symbols), start, end)
         return {s: dict(zip(v.index, v.values)) for s, v in got.items()}
 
+    def bar_frames(self, symbols, exp) -> dict:
+        """{symbol: DataFrame[close, volume]} for the same window/cache as bars()."""
+        start, end = self._bars_window(exp)
+        return self.client.option_bar_frames(list(symbols), start, end)
+
     # -- expiry choice
     @staticmethod
-    def is_monthly(e: pd.Timestamp) -> bool:
-        # 3rd Friday (or the Thursday before when Friday is a holiday)
-        return (e.weekday() == 4 and 15 <= e.day <= 21) or (e.weekday() == 3 and 14 <= e.day <= 20)
+    def is_monthly(e: pd.Timestamp, legacy: bool | None = None) -> bool:
+        """3rd Friday, or the Thursday before it when that Friday is an exchange
+        holiday. legacy=True (or engine.LEGACY_MONTHLY) restores the old rule,
+        which also counted every ordinary Thursday on the 14th-20th (daily
+        SPY/QQQ expiries) as a monthly."""
+        if LEGACY_MONTHLY if legacy is None else legacy:
+            return (e.weekday() == 4 and 15 <= e.day <= 21) or (e.weekday() == 3 and 14 <= e.day <= 20)
+        if e.weekday() == 4:
+            return 15 <= e.day <= 21 and not is_exchange_holiday_friday(e)
+        if e.weekday() == 3:
+            f = e + pd.Timedelta(days=1)
+            return 15 <= f.day <= 21 and is_exchange_holiday_friday(f)
+        return False
 
     def rank_expiries(self, d, cp, dte_min, dte_max, dte_target, monthly_only=False):
         """Expiries in the DTE window, best first: monthlies preferred, then
@@ -371,8 +472,15 @@ class Market:
 class Engine:
     def __init__(self, market: Market, strategy, capital: float, start, end,
                  costs: Costs | None = None, mark_mode: str = "model",
-                 cash_yield: bool = False, early_assign: bool = True):
+                 cash_yield: bool = False, early_assign: bool = True,
+                 signal_lag: int = 0, share_rows: bool = False):
         self.m = market
+        self.signal_lag = int(signal_lag or 0)
+        self.share_rows = bool(share_rows)
+        self.pending: list[dict] = []      # orders queued by signal_lag
+        self._executing = False
+        self._lot: dict | None = None      # current share-holding episode (trade log)
+        self.share_lots: list[dict] = []
         self.cash_yield = cash_yield
         self.early_assign = early_assign
         self.interest_earned = 0.0
@@ -396,6 +504,7 @@ class Engine:
         self.kill_events = 0
         self._next_id = 1
         self.d = None
+        self._i = 0
         self.dividends_received = 0.0
         self.fees_paid = 0.0
         self.slippage_paid = 0.0
@@ -443,6 +552,7 @@ class Engine:
         self.share_basis = (self.share_basis * self.shares + fill * n) / (self.shares + n)
         self.shares += n
         self.cash -= n * fill
+        self._lot_in(n * fill)
         self.stock_trades.append({"date": self.d, "side": "buy", "qty": n, "price": fill, "reason": reason})
 
     def sell_shares(self, n: float, reason="sell"):
@@ -458,7 +568,25 @@ class Engine:
         self.cash += n * fill - fee
         if self.shares <= 1e-9:
             self.shares, self.share_basis = 0.0, 0.0
+        self._lot_out(n * fill - fee, reason)
         self.stock_trades.append({"date": self.d, "side": "sell", "qty": n, "price": fill, "reason": reason})
+
+    # share-holding episodes for the trade log (share_rows). Amounts are $ at the reference
+    # price: fills for buys/sells, the underlying close for assignments / call-aways.
+    def _lot_in(self, amount: float):
+        if self._lot is None:
+            self._lot = {"open_date": self.d, "cost": 0.0, "proceeds": 0.0, "div": 0.0, "max": 0.0}
+        self._lot["cost"] += amount
+        self._lot["max"] = max(self._lot["max"], self.shares)
+
+    def _lot_out(self, amount: float, reason: str):
+        if self._lot is None:
+            return
+        self._lot["proceeds"] += amount
+        if self.shares <= 1e-9:
+            self._lot.update(close_date=self.d, reason=reason)
+            self.share_lots.append(self._lot)
+            self._lot = None
 
     # ----------------------------------------------------------- options
     def _fill(self, mark: float, qty: int) -> float:
@@ -469,6 +597,11 @@ class Engine:
              settle: str = "cash", meta: dict | None = None, check_cash: bool = True):
         if any(q is None for q, _ in legs) or not legs:
             return None
+        if self.signal_lag and not self._executing:
+            order = {"op": "open", "i": self._i, "legs": list(legs), "kind": kind, "reserve": reserve,
+                     "settle": settle, "meta": meta, "check_cash": check_cash}
+            self.pending.append(order)
+            return order          # truthy placeholder; the position exists after the fill
         cash_flow, mark_val, nct = 0.0, 0.0, 0
         built = []
         for q, qty in legs:
@@ -496,6 +629,10 @@ class Engine:
         return p
 
     def close(self, p: Position, reason: str):
+        if self.signal_lag and not self._executing:
+            if not any(o["op"] == "close" and o["pos"] is p for o in self.pending):
+                self.pending.append({"op": "close", "i": self._i, "pos": p, "reason": reason})
+            return
         cf, nct = 0.0, 0
         for l in p.legs:
             if not l.open:
@@ -518,6 +655,45 @@ class Engine:
         p.reserve = 0.0
         self.positions.remove(p)
         self.closed.append(p)
+
+    # ------------------------------------------------------- signal lag
+    def _requote(self, q: Quote, d) -> Quote | None:
+        """Price a queued leg at today's close: its print if it traded, else the
+        model price at its last IV (flagged theo)."""
+        if q.expiry <= d:
+            return None
+        pr = q.series.get(d)
+        if pr is not None and pr > 0:
+            iv = self.m.iv_from_price(pr, d, q.strike, q.expiry, q.cp) or q.iv
+            return Quote(q.symbol, q.cp, q.strike, q.expiry, float(pr), iv,
+                         self.m.model_delta(d, q.strike, q.expiry, q.cp, iv), False, q.series)
+        pr = self.m.model_price(d, q.strike, q.expiry, q.cp, q.iv)
+        if not pr or pr < 0.01:
+            return None
+        return Quote(q.symbol, q.cp, q.strike, q.expiry, float(pr), q.iv,
+                     self.m.model_delta(d, q.strike, q.expiry, q.cp, q.iv), True, q.series)
+
+    def _execute_pending(self, d):
+        due = [o for o in self.pending if self._i - o["i"] >= self.signal_lag]
+        if not due:
+            return
+        due_ids = {id(o) for o in due}
+        self.pending = [o for o in self.pending if id(o) not in due_ids]
+        self._executing = True
+        try:
+            for o in due:
+                if o["op"] == "close":
+                    if o["pos"] in self.positions:
+                        self.close(o["pos"], o["reason"])
+                    continue
+                legs = [(self._requote(q, d), qty) for q, qty in o["legs"]]
+                if any(q is None for q, _ in legs):
+                    self.note("lagged entry dropped: a leg expired or could not be priced at the fill")
+                    continue
+                if self.open(legs, o["kind"], o["reserve"], o["settle"], o["meta"], o["check_cash"]) is None:
+                    self.note("lagged entry rejected at the fill: not enough free cash")
+        finally:
+            self._executing = False
 
     # --------------------------------------------------------- daily steps
     def _mark(self, d):
@@ -562,6 +738,7 @@ class Engine:
                         self.share_basis = ((self.share_basis * self.shares + l.strike * 100 * n)
                                             / (self.shares + 100 * n))
                         self.shares += 100 * n
+                        self._lot_in(Se * 100 * n)   # option row books the intrinsic
                         self.stock_trades.append({"date": d, "side": "assigned_buy", "qty": 100 * n,
                                                   "price": l.strike, "reason": "put assignment"})
                     else:                 # called away
@@ -572,6 +749,7 @@ class Engine:
                             self.cash -= intrinsic * (100 * n - deliver)
                         if self.shares <= 1e-9:
                             self.shares, self.share_basis = 0.0, 0.0
+                        self._lot_out(Se * deliver, "called_away")
                         self.stock_trades.append({"date": d, "side": "called_away", "qty": deliver,
                                                   "price": l.strike, "reason": "call assignment"})
                     p.exit_cash += l.qty * 100 * intrinsic   # cash-equivalent P&L for the trade log
@@ -611,6 +789,7 @@ class Engine:
                     self.cash += l.strike * deliver - intrinsic * (100 * n - deliver)
                     if self.shares <= 1e-9:
                         self.shares, self.share_basis = 0.0, 0.0
+                    self._lot_out(S * deliver, "called_away_early")
                     self.stock_trades.append({"date": d, "side": "called_away", "qty": deliver,
                                               "price": l.strike, "reason": "early assignment (ex-div)"})
                 else:
@@ -636,6 +815,8 @@ class Engine:
             amt = self.shares * row["dividend"]
             self.cash += amt
             self.dividends_received += amt
+            if self._lot is not None:
+                self._lot["div"] += amt
 
     # ------------------------------------------------------------------ run
     def run(self):
@@ -643,6 +824,7 @@ class Engine:
         idx = self.m.stock.index
         for i, d in enumerate(self.dates):
             self.d = d
+            self._i = i
             if i > 0:
                 self._accrue(self.dates[i - 1], d)
                 self._corporate_actions(d)
@@ -652,6 +834,8 @@ class Engine:
                 nxt = idx[idx > d]
                 if len(nxt) and self.m.stock.at[nxt[0], "dividend"] > 0:
                     self._early_assign_calls(d, float(self.m.stock.at[nxt[0], "dividend"]))
+            if self.pending:
+                self._execute_pending(d)
             st.on_day(self, d)
             self._record(d)
         self.n_theo = self.m.n_theo
@@ -677,7 +861,40 @@ class Engine:
     def equity_frame(self) -> pd.DataFrame:
         return pd.DataFrame(self.records).set_index("date")
 
-    def trades_frame(self) -> pd.DataFrame:
+    def share_rows_frame(self) -> pd.DataFrame:
+        """One row per share-holding episode (see module docstring, share_rows)."""
+        rows = []
+        lots = self.share_lots + ([self._lot] if self._lot is not None else [])
+        for k, lot in enumerate(lots):
+            open_ = lot is self._lot
+            mv = self.shares * self.spot() if open_ else 0.0
+            pnl = lot["proceeds"] + lot["div"] + mv - lot["cost"]
+            close = None if open_ else lot["close_date"]
+            rows.append({
+                "id": 1_000_000 + k, "kind": "shares", "open_date": lot["open_date"].date(),
+                "close_date": close.date() if close is not None else None,
+                "legs": f"{lot['max']:g} {self.m.symbol} shares", "contracts": 0,
+                "entry_cash": round(-lot["cost"], 2), "exit_cash": round(lot["proceeds"] + lot["div"], 2),
+                "pnl": round(pnl, 2), "reserve_at_open": 0.0,
+                "reason": "open_at_end" if open_ else lot["reason"],
+                "stale_mark_days": 0, "theo_entry": False,
+                "days_held": ((close or self.d) - lot["open_date"]).days, "assigned": False,
+            })
+        return pd.DataFrame(rows)
+
+    def trades_frame(self, include_shares: bool | None = None) -> pd.DataFrame:
+        """Option trade log. include_shares (default: the engine's share_rows
+        flag) appends the share-episode rows (kind 'shares')."""
+        if include_shares is None:
+            include_shares = self.share_rows
+        df = self._option_trades_frame()
+        if include_shares:
+            sh = self.share_rows_frame()
+            if len(sh):
+                df = pd.concat([df, sh], ignore_index=True) if len(df) else sh
+        return df
+
+    def _option_trades_frame(self) -> pd.DataFrame:
         rows = []
         for p in self.closed + self.positions:
             legs = ";".join(f"{'+' if l.qty > 0 else ''}{l.qty} {l.symbol}@{l.entry_price:.2f}" for l in p.legs)

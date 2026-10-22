@@ -115,6 +115,7 @@ def risk_free(d) -> float:
 DIV_YIELD = {
     "SPY": 0.013, "QQQ": 0.006, "IWM": 0.012, "AAPL": 0.005, "MSFT": 0.008,
     "NVDA": 0.0003, "AMZN": 0.0, "GOOGL": 0.004, "META": 0.0035,
+    "TSLA": 0.0, "NFLX": 0.0,     # no cash dividends (tuning/events/BUGS.md #1)
 }
 
 

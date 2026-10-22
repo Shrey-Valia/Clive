@@ -3,6 +3,28 @@
 Every strategy implements on_day(eng, d), called after marks & expirations.
 Exits are checked before entries. All sizing is cash-secured: no naked calls,
 no margin leverage (except the inherent leverage of long LEAPS in the PMCC).
+
+Parameters added by tuning/engine_fixes (see tuning/*/BUGS.md)
+---------------------------------------------------------------
+* PutCreditSpread / IronCondor (and subclasses) `max_credit_frac` (default
+  0.60): skip an entry whose mark credit exceeds this fraction of the width.
+  Leg closes are asynchronous last prints; a stale short leg can show e.g.
+  $1.81 credit on a $2 width and size the trade at ~0 max loss (huge count).
+  None = legacy (no guard).
+* kill switch `kill_loss_basis` (default "max_loss"): for positions with long
+  protection the loss leg fires at pnl < -kill_loss_spread (default 0.50) x
+  structural max loss; naked positions keep pnl < -kill_loss x short-strike
+  notional. "notional" = legacy (notional for everything; it could never fire
+  on a vertical because 8% of notional exceeds the spread's whole max loss).
+* Wheel `call_basis_fallback` (default False): with call_above_basis, when the
+  first strike >= basis prices < $0.05 (or none exists) the call is skipped
+  for the day. True = legacy (silently sell the target-delta strike, which
+  can be below basis).
+* CoveredCall / Collar `roll_itm` (default True = legacy, unchanged): True
+  buys back the short call at roll_dte whatever its moneyness (an ITM call is
+  closed at a loss and re-sold; shares are never called away). False rolls
+  only OTM calls at roll_dte, holds ITM calls to expiry with physical
+  settlement (shares called away, lots re-bought at the next decision).
 """
 from __future__ import annotations
 
@@ -56,7 +78,9 @@ class Strategy:
         """Returns True when new short-premium entries are blocked today.
 
         Signal at close t: VIX/VIX3M > kill_ratio, VIX > kill_vix, or a position
-        loss > kill_loss * notional (short strikes*100*n). Action: close all
+        loss > kill_loss * notional (short strikes*100*n) for naked positions /
+        > kill_loss_spread * structural max loss for positions with long
+        protection (kill_loss_basis="notional" restores the legacy rule). Action: close all
         open positions at the close of t+1. Re-entry only after the next monthly
         expiry and once VIX/VIX3M <= kill_ratio and VIX <= kill_vix."""
         p = self.p
@@ -78,8 +102,14 @@ class Strategy:
             return True
         loss_hit = False
         for pos in eng.positions:
-            notional = sum(-l.qty * 100 * l.strike for l in pos.legs if l.qty < 0 and l.open)
             pnl = pos.entry_cash + pos.exit_cash + pos.value()
+            ml = pos.max_loss() if p.get("kill_loss_basis", "max_loss") == "max_loss" else None
+            if ml is not None:
+                # defined-risk position: loss as a fraction of its structural max loss
+                if ml > 0 and pnl < -p.get("kill_loss_spread", 0.50) * ml:
+                    loss_hit = True
+                continue
+            notional = sum(-l.qty * 100 * l.strike for l in pos.legs if l.qty < 0 and l.open)
             if notional > 0 and pnl < -p.get("kill_loss", 0.08) * notional:
                 loss_hit = True
         if eng.positions and (stress or loss_hit):
@@ -148,10 +178,13 @@ class _StockPlusCalls(Strategy):
 
     def on_day(self, eng, d):
         p = self.p
+        roll_itm = p.get("roll_itm", True)
         for pos in list(eng.positions):
             reason = None
             if p.get("roll_dte") is not None and pos.min_dte(d) <= p["roll_dte"]:
-                reason = "roll"
+                itm = any(l.open and l.qty < 0 and l.cp == "C" and eng.spot() > l.strike for l in pos.legs)
+                if roll_itm or not itm:
+                    reason = "roll"
             elif p.get("tp") is not None:
                 short = [l for l in pos.legs if l.qty < 0 and l.open]
                 if short:
@@ -172,20 +205,21 @@ class _StockPlusCalls(Strategy):
             if put is None:
                 return
             legs.append((put, lots))
-        eng.open(legs, self.id, reserve=0.0)  # covered by shares
+        # covered by shares; roll_itm=False holds ITM calls -> physical call-away at expiry
+        eng.open(legs, self.id, reserve=0.0, settle="cash" if roll_itm else "physical")
 
 
 class CoveredCall(_StockPlusCalls):
     id, name = "covered_call", "Covered call"
     defaults = dict(call_delta=0.30, dte_min=30, dte_max=45, dte_target=38, roll_dte=21,
-                    tp=None, alloc=1.0)
+                    tp=None, alloc=1.0, roll_itm=True)
 
 
 class Collar(_StockPlusCalls):
     id, name = "collar", "Collar"
     use_put = True
     defaults = dict(call_delta=0.30, put_delta=0.25, dte_min=30, dte_max=45, dte_target=38,
-                    roll_dte=21, tp=None, alloc=1.0)
+                    roll_dte=21, tp=None, alloc=1.0, roll_itm=True)
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +256,8 @@ class CashSecuredPut(Strategy):
 class Wheel(Strategy):
     id, name = "wheel", "The wheel"
     defaults = dict(put_delta=0.30, call_delta=0.30, dte_min=30, dte_max=45, dte_target=38,
-                    put_tp=0.5, call_tp=None, call_above_basis=True, alloc=1.0)
+                    put_tp=0.5, call_tp=None, call_above_basis=True, call_basis_fallback=False,
+                    alloc=1.0)
 
     def on_day(self, eng, d):
         p = self.p
@@ -257,10 +292,14 @@ class Wheel(Strategy):
             if p["call_above_basis"] and q.strike < eng.share_basis:
                 g = eng.m._by_exp[(q.expiry, "C")]
                 ks = g[g.strike_price >= eng.share_basis].strike_price
+                q2 = None
                 if len(ks):
                     q2 = eng.m.select(d, "C", strike=float(ks.iloc[0]), expiry=q.expiry, iv_hint=q.iv)
-                    if q2 is not None and q2.price >= 0.05:
-                        q = q2
+                if q2 is not None and q2.price >= 0.05:
+                    q = q2
+                elif not p.get("call_basis_fallback", False):
+                    eng.note("skipped call: no strike >= share basis worth >= $0.05 (held uncovered)")
+                    return
             eng.open([(q, -lots)], "wheel_call", reserve=0.0, settle="physical")
 
 
@@ -270,7 +309,15 @@ class PutCreditSpread(Strategy):
     defaults = dict(short_delta=0.25, long_delta=0.10, width_pct=None, width_abs=None,
                     dte_min=30, dte_max=45,
                     dte_target=38, tp=0.5, sl_mult=2.0, close_dte=21, risk_frac=0.25,
-                    max_positions=1, filter=None)
+                    max_positions=1, filter=None, max_credit_frac=0.60)
+
+    def credit_ok(self, eng, credit, width) -> bool:
+        """Asynchronous-print guard (tuning/signals/BUGS.md #7)."""
+        f = self.p.get("max_credit_frac")
+        if f is not None and credit > f * width:
+            eng.note("skipped entry: credit > max_credit_frac x width (asynchronous leg prints)")
+            return False
+        return True
 
     def long_leg(self, eng, d, short, cp, delta_key="long_delta"):
         p = self.p
@@ -312,7 +359,7 @@ class PutCreditSpread(Strategy):
             return
         width = sp.strike - lp.strike
         credit = sp.price - lp.price
-        if credit <= 0.05:
+        if credit <= 0.05 or not self.credit_ok(eng, credit, width):
             return
         n = self.size(eng, (width - credit) * 100)
         if n == 0:
@@ -337,7 +384,7 @@ class IronCondor(PutCreditSpread):
     defaults = dict(short_delta=0.16, long_delta=0.05, width_pct=None, width_abs=None,
                     dte_min=38, dte_max=52,
                     dte_target=45, tp=0.5, sl_mult=None, close_dte=21, risk_frac=0.25,
-                    max_positions=1, filter=None)
+                    max_positions=1, filter=None, max_credit_frac=0.60)
 
     def on_day(self, eng, d):
         self.manage(eng, d)
@@ -360,6 +407,8 @@ class IronCondor(PutCreditSpread):
         if credit <= 0.10:
             return
         width = max(wp, wc)
+        if not self.credit_ok(eng, credit, width):
+            return
         n = self.size(eng, (width - credit) * 100)
         if n == 0:
             eng.blocked("skipped entries: one condor's max loss exceeds risk budget")
