@@ -98,7 +98,7 @@ This work is on branch `worktree-agent-a3851c11be3d11ec2`. Nothing has been depl
   - It runs the suites: shorting 210, options 119, health+shadow 44, all passing.
   - pyarrow is not a dependency.
 - **Not testable in a container:** ufw and fail2ban banning, swapon, chrony setting the clock, a real reboot, and the `ubuntu`-admin path (Oracle). The ubuntu path is the same code with `SUDO_USER`. The first real droplet run (`bootstrap.sh --verify`) covers these.
-- Clean-up: the test containers, images and volume are removed by the scripts. The shellcheck, binfmt and ubuntu images used for testing were removed afterwards.
+- Clean-up: the test containers, images and volume are removed by the scripts. The shellcheck and binfmt images were removed afterwards, and the qemu x86_64 binfmt handler was uninstalled. `ubuntu:24.04` was already on the machine and was kept. Docker Desktop was started for the tests and quit again.
 
 ## Next steps
 1. Shrey: Part 1 of `QUICKSTART_DIGITALOCEAN.md` (one command, the droplet form, an optional healthchecks.io check), then send Claude the IPv4.
