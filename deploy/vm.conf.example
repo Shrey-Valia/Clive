@@ -1,6 +1,7 @@
 # Copy to deploy/vm.conf and fill in. vm.conf is git-ignored; it holds no secrets.
-VM_HOST=203.0.113.10        # the VM's public IP (or a hostname)
-VM_ADMIN=ubuntu             # the cloud image's sudo user: "ubuntu" on Oracle/AWS Ubuntu, your username on GCP
-VM_USER=clive               # created by bootstrap.sh; runs the bots
+VM_HOST=203.0.113.10        # the VM's public IPv4 (or a hostname)
+VM_ADMIN=root               # the image's admin user: root on DigitalOcean / Hetzner,
+                            # ubuntu on Oracle / AWS Ubuntu, your username on GCP
+VM_USER=clive               # created by bootstrap.sh; runs the bots (no sudo)
 SSH_KEY=~/.ssh/clive_vm     # private key for both users (bootstrap copies the admin's key to clive)
 SSH_PORT=22

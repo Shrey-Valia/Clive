@@ -14,7 +14,7 @@ load_conf() {
   # shellcheck source=/dev/null
   . "$conf"
   : "${VM_HOST:?set VM_HOST in deploy/vm.conf}"
-  VM_ADMIN="${VM_ADMIN:-ubuntu}"; VM_USER="${VM_USER:-clive}"; SSH_PORT="${SSH_PORT:-22}"
+  VM_ADMIN="${VM_ADMIN:-root}"; VM_USER="${VM_USER:-clive}"; SSH_PORT="${SSH_PORT:-22}"
   SSH_OPTS=(-p "$SSH_PORT" -o ServerAliveInterval=30 -o ConnectTimeout=15)
   if [[ -n "${SSH_KEY:-}" ]]; then
     SSH_KEY="${SSH_KEY/#\~/$HOME}"

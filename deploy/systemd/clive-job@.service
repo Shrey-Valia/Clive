@@ -21,6 +21,9 @@ ExecStart=/opt/clive/app/deploy/bin/run-job.sh %i
 # Backstop only; run-job.sh applies a tighter per-job timeout (30-45 min).
 TimeoutStartSec=75min
 KillMode=control-group
+# On a 1 GB droplet the kernel's OOM killer must pick something else (a stray shell, apt) before
+# a trading job. Negative values are applied by systemd before it drops to User=clive.
+OOMScoreAdjust=-300
 SyslogIdentifier=clive-%i
 StandardOutput=journal
 StandardError=journal
