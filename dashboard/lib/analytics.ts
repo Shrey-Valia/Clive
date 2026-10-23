@@ -72,7 +72,8 @@ export type Today = {
   rerun?: string;
 };
 
-export type DayCtx = { runs?: Run[]; bookOrders?: Order[] };
+/** flow: the bot's current flow (lib/next-action currentFlow); defaults to the run row's own. */
+export type DayCtx = { runs?: Run[]; bookOrders?: Order[]; flow?: Flow };
 
 /** The v2 book trading on `day` and the scan made on `day` (for tomorrow). */
 export function v2Runs(runs: Run[], day: string) {
@@ -88,7 +89,7 @@ export function todayState(run: Run | null, orders: Order[], account: Account | 
   const dayPl = eq !== null && last !== null ? eq - last : null;
   const dayPct = dayPl !== null && last ? (100 * dayPl) / last : null;
   const base = { head, dayPl, dayPct };
-  const flow = runFlow(run);
+  const flow = ctx.flow ?? runFlow(run);
   const nr = nextRun(now, flow);
   const lastRun = run ? `LAST RUN ${dayLabel(run.run_date)} · ${run.mode === "execute" ? "LIVE" : "DRY RUN"} · ${RUN_STATUS_LABEL[run.status] ?? run.status.replace(/_/g, " ").toUpperCase()}` : "NO RUNS RECORDED";
   if (flow === "intraday_v2") return todayV2(base, ctx.runs ?? (run ? [run] : []), ctx.bookOrders ?? orders, lastRun, nr, now);
@@ -185,7 +186,7 @@ type Pick3 = { head: string; dayPl: number | null; dayPct: number | null };
 /** 4-step day timeline: Scan → Trade → Cutoff → Sync. */
 export type Step = { key: string; label: string; at: string; state: "done" | "pending" | "failed" | "skipped" | "late"; actual: string | null };
 export function dayTimeline(run: Run | null, orders: Order[], snaps: Snap[], now = new Date(), ctx: DayCtx & { syncs?: SyncRun[]; bot?: Bot | null } = {}): Step[] {
-  if (runFlow(run) === "intraday_v2") return timelineV2(ctx.runs ?? (run ? [run] : []), ctx.bookOrders ?? orders, snaps, now, ctx.syncs ?? [], ctx.bot ?? null);
+  if ((ctx.flow ?? runFlow(run)) === "intraday_v2") return timelineV2(ctx.runs ?? (run ? [run] : []), ctx.bookOrders ?? orders, snaps, now, ctx.syncs ?? [], ctx.bot ?? null);
   const p = etParts(now);
   const day = isTradingDay(p.date) ? p.date : null;
   const s = schedule(day ?? p.date);
@@ -322,6 +323,8 @@ export function monthlyReturns(eq: DatePt[]): { month: string; ret: number }[] {
 export type Perf = {
   days: number; maxDd: number | null; maxDdDate: string | null; curDd: number | null; sharpe: number | null; sortino: number | null;
   best: { date: string; v: number } | null; worst: { date: string; v: number } | null;
+  /** Days with a usable day P&L (best/worst are null below 2). */
+  pnlDays: number;
   trades: number; wins: number; winRate: number | null; pf: number | null; avgWin: number | null; avgLoss: number | null;
   avgPct: number | null; totalPnl: number; worstTrade: Trade | null; bestTrade: Trade | null;
 };
@@ -349,7 +352,8 @@ export function performance(snaps: Snap[], trades: Trade[]): Perf {
     days: snaps.length, maxDd, maxDdDate, curDd: dd.length ? dd[dd.length - 1].value : null,
     sharpe: rets.length >= 5 && sd > 0 ? (mean / sd) * Math.sqrt(252) : null,
     sortino: rets.length >= 5 && dsd > 0 ? (mean / dsd) * Math.sqrt(252) : null,
-    best, worst,
+    // One P&L day makes best = worst; show neither until there are two to compare.
+    best: rets.length >= 2 ? best : null, worst: rets.length >= 2 ? worst : null, pnlDays: rets.length,
     trades: trades.length, wins: winsT.length, winRate: trades.length ? (100 * winsT.length) / trades.length : null,
     pf: gl > 0 ? gw / gl : winsT.length ? Infinity : null,
     avgWin: winsT.length ? gw / winsT.length : null, avgLoss: lossT.length ? -gl / lossT.length : null,

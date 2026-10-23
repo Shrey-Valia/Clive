@@ -70,6 +70,7 @@ export type OptOrder = {
 export type OptPosition = {
   spread_id: string; underlying: string | null; expiry: string | null; short_symbol: string | null; long_symbol: string | null;
   short_strike: number | null; long_strike: number | null; qty: number | null; entry_date: string | null; entry_credit: number | null;
+  sleeve?: string | null;   // 006_options_sleeves: dip | condor
   mark_debit: number | null; unrealized_pl: number | null; max_loss: number | null; updated_at: string | null;
 };
 export type OptTrade = {

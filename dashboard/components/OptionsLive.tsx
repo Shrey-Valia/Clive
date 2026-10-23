@@ -9,6 +9,7 @@ import { riskDaysUntil } from "@/lib/events";
 import { equitySeries } from "@/lib/analytics";
 import { dayLabel, etHm, etTime, md, num, pct, usd, ymd } from "@/lib/format";
 import { addDays, etParts, isTradingDay } from "@/lib/time";
+import { optionsNextDecision, sleeveStatus } from "@/lib/next-action";
 
 const dte = (expiry: string | null, today: string) => {
   if (!expiry) return null;
@@ -37,12 +38,14 @@ export function OptionsLive({ d, events, sample }: { d: OL; events: MarketEvent[
   const todayRuns = d.runs.filter((r) => r.run_date === today);
   const run = todayRuns[0] ?? null;
   const sim = d.simulated;
+  const nd = optionsNextDecision(d.runs);
+  const sleeves = sleeveStatus(d.positions, d.runs);
   // macro risk days between now and the furthest open expiry
   const lastExp = d.positions.map((p) => p.expiry).filter(Boolean).sort().pop() ?? null;
   const riskDays = lastExp ? riskDaysUntil(events, today, lastExp) : [];
   const runLine = run
     ? <>{(run.kind ?? "daily").toUpperCase()} RUN {etHm(run.started_at)} · <span className={`pill ${statusTone(run.status)}`}>{run.status.toUpperCase()}</span> · {run.mode === "execute" ? "LIVE PAPER" : "DRY RUN"} · {run.n_entries ?? 0} ENTRIES · {run.n_exits ?? 0} EXITS{run.vix !== null ? ` · VIX ${num(run.vix, 1)}` : ""}{run.kill_switch ? " · KILL SWITCH ON" : ""}{run.message ? ` · ${run.message.toUpperCase()}` : ""}</>
-    : isTradingDay(today) ? <>NO RUN TODAY YET · DAILY RUN 15:50 ET{d.runs[0] ? ` · LAST ${dayLabel(d.runs[0].run_date)} ${d.runs[0].status.toUpperCase()}` : ""}</>
+    : isTradingDay(today) ? <>NO RUN TODAY YET · DAILY RUN {nd.date === today ? nd.run : "15:45"} ET{d.runs[0] ? ` · LAST ${dayLabel(d.runs[0].run_date)} ${d.runs[0].status.toUpperCase()}` : ""}</>
     : <>MARKET CLOSED TODAY{d.runs[0] ? ` · LAST RUN ${dayLabel(d.runs[0].run_date)} ${d.runs[0].status.toUpperCase()}` : ""}</>;
 
   return (
@@ -66,6 +69,20 @@ export function OptionsLive({ d, events, sample }: { d: OL; events: MarketEvent[
         <Stat label="MAX LOSS AT RISK" sub={last?.equity ? `${pct((100 * atRisk) / last.equity, 1)} OF EQUITY` : undefined}>{usd(atRisk, false, 0)}</Stat>
         <Stat label="CLOSED P&L" sub={d.trades.length ? `${wins}/${d.trades.length} WINS` : "NO CLOSED TRADES"}><Sgn v={d.trades.length ? closedPl : null} /></Stat>
       </div>
+
+      <Panel title="Next decision · sleeves" code="NEXT" sim={sim}
+        meta={`RUN ${nd.run} ET · DECIDES ${nd.decide}${nd.half ? " · HALF DAY" : ""} · 12:45 / 12:55 ON HALF DAYS`}>
+        <div className="stats inner">
+          <Stat label="NEXT DECISION" sub={`${nd.date === today ? "TODAY" : dayLabel(nd.date)} · DECIDES ${nd.decide} ET`}>{nd.run} ET</Stat>
+          {nd.doneToday && <Stat label="TODAY" sub="DAILY RUN RECORDED">DONE</Stat>}
+          {sleeves.map((x) => (
+            <Stat key={x.id} label={x.label} sub={x.lastAction ? `LAST PLAN: ${x.lastAction.toUpperCase()}` : "NO PLAN RECORDED YET"}>
+              {x.open ? <>{x.open} OPEN · <Sgn v={x.openPl} digits={0} /></> : "FLAT"}
+            </Stat>
+          ))}
+        </div>
+        <p className="note">09:45 expiry sweep · intraday exits every 15 min 10:00–15:30 · daily run {nd.run} ET (decision {nd.decide}) · 16:15 sync. Condor and dip share one max-loss budget.</p>
+      </Panel>
 
       <Panel n={1} hot title="Open spreads" code="SPRD" sim={sim} meta={`${d.positions.length} OPEN · CREDIT AND MAX LOSS IN $ · DTE = CALENDAR DAYS`}>
         {riskDays.length > 0 && (

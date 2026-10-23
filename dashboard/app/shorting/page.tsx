@@ -6,9 +6,10 @@ import { ExposureBars, MonthlyReturnsHeatmap, ScanFunnel, ScoreBoard, ScoreLegen
 import { ScanBoard } from "@/components/ScanBoard";
 import { Num } from "@/components/Live";
 import { getEvents, getShorting } from "@/lib/data";
-import { attribute, dayTimeline, equitySeries, funnel, isLive, monthlyReturns, performance, risk, runFlow, systemLog, todayState, tradeDate } from "@/lib/analytics";
+import { attribute, dayTimeline, equitySeries, funnel, isLive, monthlyReturns, performance, risk, systemLog, todayState, tradeDate } from "@/lib/analytics";
 import { companyEventsWithin } from "@/lib/events";
 import { etParts } from "@/lib/time";
+import { currentFlow, shortingNextAction } from "@/lib/next-action";
 import { RUN_LABEL } from "@/lib/glossary";
 import { dayLabel, etDateOf, etHm, etTime, md, num, pct, usd, ymd } from "@/lib/format";
 import type { MarketEvent, Trade } from "@/lib/types";
@@ -24,10 +25,12 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
   const { bot, run, runs, candidates, orders, snaps, trades, positions, account, simulated: sim } = s;
   const live = isLive(run);
   const now = new Date();
-  const ctx = { runs, bookOrders: s.bookOrders };
+  const flow = currentFlow(runs);
+  const ctx = { runs, bookOrders: s.bookOrders, flow };
   const today = todayState(run, orders, account, now, ctx);
   const steps = dayTimeline(run, orders, snaps, now, { ...ctx, syncs: s.syncs, bot });
-  const v2 = runFlow(run) === "intraday_v2";
+  const v2 = flow === "intraday_v2";
+  const next = shortingNextAction({ runs, positions: account ? positions : null, now });
   const todayEt = etParts(now).date;
   // company events (earnings, calls, investor days, talks) within 2 sessions, for every pick and held name
   const evBy: Record<string, MarketEvent[]> = {};
@@ -103,10 +106,11 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
       </div>
 
       <Panel n={1} title="Open positions" code="PRTU" sim={sim} meta={account ? `${sim ? "SIM" : "LIVE · ALPACA"} · AS OF ${asOf} ET` : "ALPACA OFFLINE"}>
+        {v2 && account !== null && positions.length > 0 && <div className={`empty line ${next.tone === "bad" ? "bad" : next.tone === "warn" ? "warn" : ""}`}>{next.text}{next.sub ? <span className="muted"> · {next.sub}</span> : null}</div>}
         {account === null ? (
           <Empty>Alpaca keys aren&apos;t set on the server. Add <code>APCA_API_KEY_ID</code> and <code>APCA_API_SECRET_KEY</code> in Vercel.</Empty>
         ) : positions.length === 0 ? (
-          <Empty>{v2 ? "FLAT · NEXT BOOK OPENS AT THE 09:31 ET OPEN" : "FLAT · NEXT FIVE SHORTS OPEN AT 15:55 ET"}{!live && run ? " · BOT IS IN DRY RUN, NOTHING WILL OPEN" : ""}</Empty>
+          <Empty>{v2 ? next.text : "FLAT · NEXT FIVE SHORTS OPEN AT 15:55 ET"}{!v2 && !live && run ? " · BOT IS IN DRY RUN, NOTHING WILL OPEN" : ""}{v2 && next.sub ? <span className="muted"> · {next.sub}</span> : null}</Empty>
         ) : (
           <>
             <div className="scroll desk-only"><table className="dense fit">
@@ -207,8 +211,10 @@ export default async function Shorting({ searchParams }: { searchParams: Promise
           <Stat label="SORTINO" term="SORTINO">{num(perf.sortino, 2)}</Stat>
           <Stat label="PROFIT FACTOR" term="PF">{perf.pf === null ? "—" : Number.isFinite(perf.pf) ? perf.pf.toFixed(2) : "∞"}</Stat>
           <Stat label="AVG WIN / LOSS"><Sgn v={perf.avgWin} digits={0} /> <span className="muted">/</span> <Sgn v={perf.avgLoss} digits={0} /></Stat>
-          <Stat label="BEST DAY" sub={perf.best ? md(perf.best.date) : undefined}><Sgn v={perf.best?.v ?? null} digits={0} /></Stat>
-          <Stat label="WORST DAY" sub={perf.worst ? md(perf.worst.date) : undefined}><Sgn v={perf.worst?.v ?? null} digits={0} /></Stat>
+          {perf.best && perf.worst && perf.pnlDays >= 2 && <>
+            <Stat label="BEST DAY" sub={md(perf.best.date)}><Sgn v={perf.best.v} digits={0} /></Stat>
+            <Stat label="WORST DAY" sub={md(perf.worst.date)}><Sgn v={perf.worst.v} digits={0} /></Stat>
+          </>}
         </div>
         <div className="grid2 tight">
           <div>

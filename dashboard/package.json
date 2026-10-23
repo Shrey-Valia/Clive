@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --experimental-strip-types --no-warnings --import ./tests/register.mjs --test tests/next-action.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@supabase/ssr": "0.7.0",

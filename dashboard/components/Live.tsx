@@ -68,7 +68,7 @@ export function ChromeGate({ children }: { children: React.ReactNode }) {
 }
 
 /** Sticky bottom status bar with live fields. */
-export function StatusBar({ demo, email, positions, gross, lastSync, flow = "overnight_v1" }: {
+export function StatusBar({ demo, email, positions, gross, lastSync, flow = "intraday_v2" }: {
   demo: boolean; email: string | null; positions: number | null; gross: number | null; lastSync: string | null; flow?: string;
 }) {
   const now = useNow(1000);

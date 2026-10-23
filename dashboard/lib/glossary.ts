@@ -23,14 +23,14 @@ export const GLOSSARY: Record<string, string> = {
   SORTINO: "Like Sharpe but divides by downside deviation only.",
   PF: "Profit factor: gross winning $ ÷ gross losing $. Above 1 makes money.",
   CAGR: "Compound annual growth rate.",
-  ROTATION: "overnight_v1: at 15:55 ET the bot covers yesterday's shorts and opens today's five. intraday_v2: picks from the 15:45 scan are shorted at the next 09:31 open and covered at 15:55 the same day.",
+  ROTATION: "overnight_v1: at 15:55 ET the bot covers yesterday's shorts and opens today's five. intraday_v2 (current): picks from the 15:45 scan are shorted at the next 09:31 open and covered at 15:55 the same day, when the long sleeve also buys (sold at the next 09:31).",
   "DRY RUN": "The bot scanned and picked but sent no orders. Picks read WOULD SHORT.",
   LIVE: "The bot sent real orders to the Alpaca paper account.",
   SLIP: "Slippage: fill price vs the scan's close. For a short, a lower fill is worse.",
   ETB: "Easy to borrow.",
   HTB: "Hard to borrow.",
   CUT: "Only the top 5 eligible names by rank are traded. Everything below the cut is watched, not traded.",
-  "T−": "Countdown to the next 15:55 ET rotation.",
+  "T−": "Countdown to the next bot step: 09:31 entry, 15:45 scan, or the 15:55 cover + long-sleeve buys (12:45 / 12:55 on half days).",
   MLL: "Maximum loss limit: the trailing floor a funded account can't close below.",
 };
 
