@@ -1644,7 +1644,7 @@ def main(argv=None) -> int:
         log.error("run failed: %s\n%s", e, traceback.format_exc())
         db.heartbeat("error", f"{kind} run failed: {e}")
         alerts.raise_alert("run_failed", f"{kind} run failed: {type(e).__name__}: {str(e)[:300]}", ticker=kind,
-                           level="critical")
+                           level="warning" if kind == "intraday" else "critical")    # the next check retries
         return 1
     finally:
         if args._lock:
