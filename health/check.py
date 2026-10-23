@@ -323,6 +323,7 @@ class Probe:
         self.cal: Calendar | None = None
         self.cache: dict = {}
         self.write = False
+        self.role: dict = {"role": "unknown", "trades": True}
 
     def add(self, component, name, status, message, detail=None, expected_at=None, observed_at=None):
         self.results.append({"component": component, "check_name": name, "status": status,
@@ -662,7 +663,19 @@ def evaluate_slot(slot: dict, ev: list[dict], now: dt.datetime) -> dict:
     return res
 
 
+def parked(p: Probe) -> bool:
+    """The Mac after cutover: its bot cron lines are parked (#CLIVE-ON-VM#) and the VM trades. Its
+    local logs, guards and cron lines then say nothing about the bots; the VM's rows do."""
+    return p.role.get("role") == "mac-parked"
+
+
+PARKED_NOTE = "bots run on the VM (Mac cron lines parked by deploy/mac_cron.sh); see the VM's rows"
+
+
 def check_scheduler(p: Probe):
+    if parked(p):
+        p.add("scheduler", "timeline", "ok", PARKED_NOTE, {"role": p.role.get("role")})
+        return
     cal = p.cal
     sessions = cal.last_n(p.today, 5)
     if not sessions:
@@ -1119,6 +1132,9 @@ def _load_json(path: Path):
 
 
 def check_state(p: Probe):
+    if parked(p):
+        p.add("state", "local_state", "ok", PARKED_NOTE, {"role": p.role.get("role")})
+        return
     cal, now, logs = p.cal, p.now, SHORT / "logs"
     sess = cal.get(p.today)
     # last_execute.json (15:40 job) -----------------------------------------------
@@ -1330,6 +1346,9 @@ EXPECTED_TIMERS = ["clive-short-open", "clive-short-monitor", "clive-short-close
                    "clive-opt-sync", "clive-events-sync", "clive-health-check"]
 
 
+MAC_AWAKE_CHECKS = ("sleep_setting", "wake_schedule", "sleep_today", "power_source", "lid")
+
+
 def check_host(p: Probe):
     du = shutil.disk_usage(ROOT)
     free_gb, pct = du.free / 1e9, 100 * du.free / du.total
@@ -1351,11 +1370,18 @@ def check_host(p: Probe):
           {"version": platform.python_version(), "executable": sys.executable, "bot_python_present": os.path.exists(bot_py)})
     if platform.system() == "Darwin":
         host_macos(p)
+        if parked(p):          # the Mac no longer has to stay awake: report, never alert
+            for r in p.results:
+                if r["component"] == "host" and r["check_name"] in MAC_AWAKE_CHECKS and r["status"] in ("warn", "fail"):
+                    r["status"] = "ok"
+                    r["message"] = (r["message"] + " (not the trading host)")[:900]
     elif platform.system() == "Linux":
         host_linux(p)
     # cron / timers --------------------------------------------------------------------
     ct, st = crontab_text(), systemd_timers()
-    if st is not None and st.strip():
+    if parked(p):
+        p.add("host", "schedule_entries", "ok", PARKED_NOTE, {"kind": "crontab", "parked": True})
+    elif st is not None and st.strip():
         have = [t for t in EXPECTED_TIMERS if f"{t}.timer" in st]
         miss = [t for t in EXPECTED_TIMERS if t not in have]
         p.add("host", "schedule_entries", "warn" if miss else "ok",
@@ -2053,6 +2079,10 @@ def main(argv=None) -> int:
         now = now.replace(tzinfo=ET) if now.tzinfo is None else now.astimezone(ET)
     p = Probe(now, host)
     p.write = not a.dry_run
+    try:
+        p.role = trading_role()
+    except Exception:
+        pass
     try:
         p.cal = Calendar(p.today)
     except Exception as e:                       # cannot happen (fallback inside), but never crash

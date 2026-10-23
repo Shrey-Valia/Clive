@@ -244,6 +244,39 @@ def _meminfo_or_real(real):
     return f
 
 
+# ------------------------------------------------------------------ the Mac after cutover
+def test_parked_mac_skips_local_bot_checks(monkeypatch):
+    d = dt.date(2026, 10, 23)
+    p = probe_at(dt.datetime(2026, 10, 23, 15, 0, tzinfo=ET), cal_of(d))
+    p.role = {"role": "mac-parked", "trades": False}
+    check.check_scheduler(p)
+    check.check_state(p)
+    rows = {(r["component"], r["check_name"]): r for r in p.results}
+    assert rows[("scheduler", "timeline")]["status"] == "ok"
+    assert rows[("state", "local_state")]["status"] == "ok"
+    assert len(p.results) == 2
+
+
+def test_parked_mac_awake_checks_never_alert(monkeypatch):
+    d = dt.date(2026, 10, 23)
+    p = probe_at(dt.datetime(2026, 10, 23, 15, 0, tzinfo=ET), cal_of(d))
+    p.role = {"role": "mac-parked", "trades": False}
+
+    def fake_macos(pr):
+        pr.add("host", "sleep_today", "fail", "Mac asleep 174 min in market hours today")
+        pr.add("host", "lid", "fail", "lid closed on battery in market hours")
+    monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(check, "host_macos", fake_macos)
+    monkeypatch.setattr(check, "crontab_text", lambda: "#CLIVE-ON-VM# 40 15 * * 1-5 python3 daily.py --execute\n")
+    monkeypatch.setattr(check, "systemd_timers", lambda: None)
+    monkeypatch.setattr(check, "http", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    check.check_host(p)
+    rows = {r["check_name"]: r for r in p.results}
+    assert rows["sleep_today"]["status"] == "ok" and "not the trading host" in rows["sleep_today"]["message"]
+    assert rows["lid"]["status"] == "ok"
+    assert rows["schedule_entries"]["status"] == "ok"
+
+
 # ------------------------------------------------------------------ event-alert auto-resolution
 def _alert(i, kind, at, bot="shorting"):
     return {"id": i, "bot_id": bot, "kind": kind, "level": "critical", "at": at.astimezone(dt.timezone.utc).isoformat()}
