@@ -44,6 +44,12 @@ class FakeBroker:
         self.long_mode: dict[str, object] = {}    # ticker -> "rest" (no fill yet) or ("partial", n), next submit_long only
         self.quote_map: dict[str, dict] = {}      # overrides quotes(); default ask = last = prices[t]
         self.sold_today_error: str | None = None  # sold_today() raises this
+        self.enforce = False                      # Alpaca's qty reservation / wash-trade rules (round 3 tests)
+        self.uncancellable: set[str] = set()      # order ids a cancel cannot take back (cls after 15:50)
+        self.reject_moc: dict[str, str] = {}      # ticker -> submit_moc rejection
+        self.market_mode: dict[str, object] = {}  # ticker -> "rest" / ("partial", n): next submit() only
+        self.progress_waits: list = []
+        self.on_wait = None                       # called on each wait_filled_progress (fills resting orders)
 
     # --- the broker API daily.py / monitor.py use
     def account(self):
@@ -89,19 +95,107 @@ class FakeBroker:
             raise RuntimeError(self.sold_today_error)
         return {o["ticker"] for o in self.orders if o["side"] == "sell" and o.get("filled_qty")}
 
-    def cancel_open_orders(self, symbols=None):
+    def cancel_open_orders(self, symbols=None, keep=None):
         self.events.append(("cancel", tuple(symbols or ())))
-        hit = [o for o in self.open_orders if symbols is None or o["ticker"] in symbols]
+        hit = [o for o in self.open_orders if (symbols is None or o["ticker"] in symbols)
+               and not (keep and keep(o)) and o["id"] not in self.uncancellable]
         for o in hit:
             o["status"] = "canceled"
         self.open_orders = [o for o in self.open_orders if o not in hit]
         return len(hit)
 
-    def wait_no_open_orders(self, symbols, seconds=10):
-        return True
+    def wait_no_open_orders(self, symbols, seconds=10, ignore=None):
+        return not any(o["ticker"] in symbols and not (ignore and ignore(o)) for o in self.open_orders)
 
-    def open_order_symbols(self, symbols):
-        return sorted({o["ticker"] for o in self.open_orders if o["ticker"] in symbols})
+    def open_order_symbols(self, symbols, ignore=None):
+        return sorted({o["ticker"] for o in self.open_orders if o["ticker"] in symbols and not (ignore and ignore(o))})
+
+    # --- round 3: staged MOC covers, collars, order reads
+    def _check_reservation(self, ticker, side, qty):
+        """Alpaca: an open buy reserves its shares of the short; an open opposite-side order is a
+        potential wash trade. Only enforced when self.enforce is on."""
+        if not self.enforce:
+            return
+        live = [o for o in self.open_orders if o["ticker"] == ticker]
+        if any(o["side"] != side for o in live):
+            raise RuntimeError("potential wash trade detected. use complex orders")
+        if side == "buy":
+            short = -min(0, self.pos.get(ticker, {}).get("qty", 0))
+            held = sum(o["qty"] - o["filled_qty"] for o in live if o["side"] == "buy")
+            if short and held + qty > short:
+                raise RuntimeError(f"insufficient qty available for order (requested: {qty:g}, "
+                                   f"available: {max(0, short - held):g})")
+
+    def list_open_orders(self, symbols=None):
+        out = []
+        for o in self.open_orders:
+            if symbols is not None and o["ticker"] not in symbols:
+                continue
+            typ = "stop" if o.get("stop_price") else ("limit" if o.get("limit_price") else "market")
+            out.append({"id": o["id"], "ticker": o["ticker"], "side": o["side"], "type": typ,
+                        "tif": o.get("tif", "day"), "qty": o["qty"], "filled_qty": o["filled_qty"],
+                        "remaining": o["qty"] - o["filled_qty"], "status": o["status"],
+                        "client_order_id": o.get("client_order_id"), "stop_price": o.get("stop_price"),
+                        "limit_price": o.get("limit_price")})
+        return out
+
+    def cancel_order(self, oid):
+        self.events.append(("cancel_order", oid))
+        if oid in self.uncancellable:
+            raise RuntimeError("order is not cancelable")
+        o = next((o for o in self.open_orders if o["id"] == oid), None)
+        if o is None:
+            raise RuntimeError("order not found or already closed")
+        o["status"] = "canceled"
+        self.open_orders.remove(o)
+
+    def submit_moc(self, ticker, qty, side="buy", client_order_id=None):
+        self.events.append(("moc", side, ticker, qty))
+        self.client_ids.append(client_order_id)
+        if ticker in self.reject or ticker in self.reject_moc:
+            raise RuntimeError(self.reject.get(ticker) or self.reject_moc[ticker])
+        self._check_reservation(ticker, side, qty)
+        o = {"id": f"m{len(self.orders) + 1}", "ticker": ticker, "side": side, "qty": float(qty), "status": "new",
+             "submitted_at": None, "filled_qty": 0.0, "filled_avg_price": None, "filled_at": None,
+             "tif": "cls", "client_order_id": client_order_id}
+        self.orders.append(o)
+        self.open_orders.append(o)
+        return dict(o)
+
+    def close_auction(self, fill_ratio=1.0):
+        """16:00: every open cls order fills (fill_ratio of it; the rest expires, as paper may)."""
+        for o in [o for o in self.open_orders if o.get("tif") == "cls"]:
+            self.open_orders.remove(o)
+            n = int(o["qty"] * fill_ratio)
+            if n:
+                px = self.prices.get(o["ticker"]) or 10.0
+                self._apply(o["ticker"], n if o["side"] == "buy" else -n, px)
+            o.update(status="filled" if n == o["qty"] else "expired", filled_qty=float(n))
+
+    def submit_limit(self, ticker, qty, side, limit_price, client_order_id=None):
+        self.events.append(("limit", side, ticker, qty, limit_price))
+        self.client_ids.append(client_order_id)
+        if ticker in self.reject:
+            raise RuntimeError(self.reject[ticker])
+        self._check_reservation(ticker, side, qty)
+        px = self.prices.get(ticker) or self.pos.get(ticker, {}).get("price") or 10.0
+        fill = qty if ((side == "buy" and limit_price >= px) or (side == "sell" and limit_price <= px)) else 0
+        if fill:
+            self._apply(ticker, fill if side == "buy" else -fill, px)
+        o = {"id": f"o{len(self.orders) + 1}", "ticker": ticker, "side": side, "qty": float(qty),
+             "status": "filled" if fill else "new", "submitted_at": None, "filled_qty": float(fill),
+             "filled_avg_price": px if fill else None, "filled_at": None, "limit_price": limit_price,
+             "client_order_id": client_order_id}
+        self.orders.append(o)
+        if not fill:
+            self.open_orders.append(o)
+        return dict(o)
+
+    def wait_filled_progress(self, ids, seconds, extend_until=None, stall_seconds=20):
+        self.progress_waits.append((tuple(ids), seconds))
+        if self.on_wait:
+            self.on_wait(self)
+        return self.refresh(ids)
 
     def day_trade_count(self, sessions_back=5):
         return self.day_trades
@@ -133,16 +227,19 @@ class FakeBroker:
         self.client_ids.append(client_order_id)
         if ticker in self.reject:
             raise RuntimeError(self.reject[ticker])
+        self._check_reservation(ticker, side, qty)
         px = self.prices.get(ticker) or self.pos.get(ticker, {}).get("price") or 10.0
-        signed = qty if side == "buy" else -qty
-        p = self.pos.setdefault(ticker, {"qty": 0, "entry": px, "price": px})
-        p["qty"] += signed
-        if p["qty"] == 0:
-            del self.pos[ticker]
+        mode = self.market_mode.pop(ticker, None)
+        fill = 0 if mode == "rest" else (mode[1] if isinstance(mode, tuple) else qty)
+        if fill:
+            self._apply(ticker, fill if side == "buy" else -fill, px)
+        status = "filled" if fill == qty else ("partially_filled" if fill else "new")
         o = {"id": f"o{len(self.orders) + 1}", "ticker": ticker, "side": side, "qty": float(qty),
-             "status": "filled", "submitted_at": None, "filled_qty": float(qty),
-             "filled_avg_price": px, "filled_at": None}
+             "status": status, "submitted_at": None, "filled_qty": float(fill),
+             "filled_avg_price": px if fill else None, "filled_at": None, "client_order_id": client_order_id}
         self.orders.append(o)
+        if status != "filled":
+            self.open_orders.append(o)
         return dict(o)
 
     def submit_long(self, ticker, qty, side, kind, limit_price=None, client_order_id=None):
@@ -308,8 +405,10 @@ def fake(monkeypatch):
     for name in ("account", "positions", "signed_holdings", "borrow", "adv20", "last_prices",
                  "session_today", "next_session", "cancel_open_orders", "submit", "refresh", "wait_filled",
                  "wait_no_open_orders", "open_order_symbols", "day_trade_count", "submit_stop",
-                 "submit_long", "quotes", "open_prints", "next_sessions", "sold_today"):
+                 "submit_long", "quotes", "open_prints", "next_sessions", "sold_today",
+                 "cancel_order", "submit_moc", "submit_limit", "wait_filled_progress"):
         monkeypatch.setattr(broker, name, getattr(fb, name))
+    monkeypatch.setattr(broker, "open_orders", fb.list_open_orders)
     return fb
 
 
