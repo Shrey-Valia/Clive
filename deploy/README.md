@@ -4,6 +4,8 @@ On 2026-10-22 the Mac slept from 15:01 to 16:15 ET and missed the 15:40 cover jo
 
 Nothing here changes the bots. The kit copies their code, runs the same commands the Mac crontab runs, and takes the `.env` files from the Mac at deploy time. No secret is stored in this folder.
 
+> **Round 3 (2026-10-23): the target is now a DigitalOcean $6 droplet** (x86_64, 1 GB, Ubuntu 24.04, admin `root`, NYC). Oracle A1 had no capacity and the E2.1.Micro got no public IPv4. **Start with [QUICKSTART_DIGITALOCEAN.md](QUICKSTART_DIGITALOCEAN.md)**: the owner's clicks, one command, then Claude's runbook, shadow check and rollback. Hetzner CPX11 and Oracle work the same way (`VM_ADMIN=root` or `ubuntu`). The Oracle/GCP notes below still apply to those providers. What changed this round is in [ROUND3_NOTES.md](ROUND3_NOTES.md).
+
 **Contents**
 
 1. [Which free VM](#1-which-free-vm)
@@ -70,7 +72,10 @@ Sources, checked 2026-10-22. Re-check them before you sign up, because free tier
 
 | File | Where it runs | What it does |
 |---|---|---|
-| `bootstrap.sh` | VM (root) | Idempotent setup. Creates the `clive` user, keeps the clock in UTC, sets up chrony, unattended-upgrades (reboots at 06:30 UTC only), an SSH-only firewall and key-only SSH, persistent journald, swap when RAM is under 2 GB, and uv + Python 3.13 in `/opt/clive/venv`. With `--app` it installs the requirements, the systemd units and `clive-mode`. |
+| `QUICKSTART_DIGITALOCEAN.md` | you | The short path: clicks, one command, Claude's runbook, rollback. |
+| `shadow_compare.sh` / `shadow_compare.py` | Mac | After a shadow day: pulls the VM's logs (never `.env`) and compares them with the Mac's real run: picks, 09:31 plan, 15:55 cover and sleeve, options decision, job exits. PASS/FAIL (exit 0/1), `--json`. |
+| `test/docker_test.sh` | Mac (Docker) | Runs the kit in a throwaway Ubuntu 24.04 systemd container: bootstrap, `--app`, `--verify`, timers, modes, OnFailure, SSH. `test/x86_wheels.sh` proves the x86_64 Python stack from an Apple-silicon Mac. |
+| `bootstrap.sh` | VM (root) | Idempotent setup. Admin `root` (DigitalOcean/Hetzner) or `ubuntu` (Oracle); `--verify` prints PASS/FAIL per item. Also sets up fail2ban (sshd). The SSH drop-in is `00-clive.conf`, so it wins over cloud-init's `50-` file. Creates the `clive` user, keeps the clock in UTC, sets up chrony, unattended-upgrades (reboots at 06:30 UTC only), an SSH-only firewall and key-only SSH, persistent journald, swap when RAM is under 2 GB, and uv + Python 3.13 in `/opt/clive/venv`. With `--app` it installs the requirements, the systemd units and `clive-mode`. |
 | `sync_code.sh` | Mac | rsyncs the code to `/opt/clive/app` and then runs `bootstrap.sh --app`. Never copies `.env`, `logs/`, `state/`, `.cache/`, `research/`, `tuning/` or `node_modules`. |
 | `secrets.sh` | Mac | scps the three `.env` files to the VM with chmod 600 and owner `clive`. It shows key names only. `--prompt` lets you type values in; `--deploy-env` sets `HEARTBEAT_URL`. |
 | `migrate_state.sh` | Mac | `push` / `pull` / `diff` of the bots' state files. Refuses to run while the other side is still active. |
@@ -325,7 +330,9 @@ tail -f "/opt/clive/app/Stock Shorting Bot/logs/shortingbot.log"
 - **Google external IPv4.** The free tier page lists the VM, the disk and egress. A public IPv4 address may be billed separately (a few dollars a month), and the bots need one or a paid Cloud NAT to reach the internet. Check Billing after 48 hours. If it is billed, that is the price of the fallback; Oracle includes the public IP for free.
 - **Google: one free e2-micro per month, in total.** The allowance is a pool of hours, so a second instance uses it up twice as fast. The disk must be "Standard", not "Balanced".
 - **AWS** is not a long-term free option any more: new accounts get credits, and the Free plan closes after 6 months.
-- **1 GB RAM machines** (`e2-micro`, Oracle AMD micro): the bootstrap adds 2 GB of swap with `swappiness=10`. Watch `free -m` around 15:45 in shadow mode. If swap use is high, move to Oracle A1.
+- **sshd drop-in order.** sshd keeps the *first* value it reads, and cloud images ship `sshd_config.d/50-cloud-init.conf` (DigitalOcean's sets `PasswordAuthentication yes`). The round-2 `60-clive.conf` was silently overridden. The bootstrap now writes `00-clive.conf`, removes the old file and prints the effective `sshd -T` values.
+- **Root as admin (DigitalOcean, Hetzner).** Root keeps key-only login (`PermitRootLogin prohibit-password`), because it is the only admin; the bots run as `clive` without sudo. On Oracle/AWS (`ubuntu`) root login is off.
+- **1 GB RAM machines** (DigitalOcean $6, `e2-micro`, Oracle AMD micro): the bootstrap adds a 2 GB swapfile *before* apt and uv run, with `swappiness=10`. The trading jobs get `OOMScoreAdjust=-300`. numpy, pandas, pydantic-core, curl_cffi and friends install as wheels only (`--only-binary`), so nothing compiles. The health probe's `memory` and `swap` rows warn at < 200 MB available or > 60% swap used. Watch `free -m` around 15:45 in shadow mode. If swap use is high, move to Oracle A1.
 - **Clock.** Times are ET by timezone, not by system clock. Don't change the system timezone; the bootstrap sets UTC on purpose. Chrony uses the cloud's metadata time server.
 - **Alpaca from a datacenter IP.** Paper trading is fine. TradingView's scanner and Yahoo occasionally rate-limit cloud IPs. The dry runs (section 3, step 6) and shadow days are where this would show: a scan with 0 names, or yfinance errors in `cron.log`.
 - **`SHORTING_ACCOUNT_ID`.** The options bot refuses to trade the shorting account. Its pin file (`account_pin.json`) moves with the state, so the first live run on the VM sees the same account.
