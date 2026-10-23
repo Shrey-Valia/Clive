@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from . import config as C
 
@@ -812,3 +812,81 @@ def group_book(positions: list[dict], condor_records: dict | None = None, dip_re
             o = {**o, "unmatched_qty": -int(o["qty"]) if o.get("side") == "short" else int(o["qty"])}
         orphans.append(o)
     return spreads, condors, orphans
+
+
+# ================================================================ round 3: ex-dividend early-exercise guard, slippage
+def third_friday(year: int, month: int) -> date:
+    d = date(year, month, 15)
+    return d + timedelta(days=(4 - d.weekday()) % 7)
+
+
+def exdiv_dates(symbol: str, start: date, end: date, sessions: list[date] | None = None,
+                known: list[date] | None = None) -> list[date]:
+    """Expected ex-dividend dates of ``symbol`` in [start, end].
+
+    SPY (EXDIV_QUARTER_MONTHS): the third Friday of Mar/Jun/Sep/Dec, moved to the previous
+    session when that Friday is not a trading day (2026-06-18 for the Juneteenth Friday). Alpaca's
+    corporate-actions history confirms the rule (2024-12-20 ... 2026-09-18). ``known`` (announced
+    dates from Alpaca) replace the rule date in the same month."""
+    months = C.EXDIV_QUARTER_MONTHS.get(symbol)
+    out = set()
+    known = sorted(known or [])
+    if months:
+        sset = set(sessions or [])
+        lo, hi = (min(sset), max(sset)) if sset else (None, None)
+        y, m = start.year, start.month
+        while date(y, m, 1) <= end:
+            if m in months:
+                d = third_friday(y, m)
+                if sset:
+                    while lo <= d <= hi and d not in sset:
+                        d -= timedelta(days=1)
+                if not any(k.year == d.year and k.month == d.month for k in known):
+                    out.add(d)
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    out |= set(known)
+    return sorted(d for d in out if start <= d <= end)
+
+
+def last_cum_div_session(ex_date: date, sessions: list[date]) -> date:
+    """The last trading session before ``ex_date`` (the day a call holder exercises early)."""
+    prior = [s for s in sessions if s < ex_date]
+    if prior:
+        return max(prior)
+    d = ex_date - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def early_exercise_risk(call_strike: float, call: OptionQuote | None, spot: float | None,
+                        dividend: float) -> tuple[bool, str]:
+    """(at risk, why) for a SHORT call on the last cum-dividend session: the standard
+    rational-exercise test, in the money and extrinsic value (call mid - intrinsic) below the
+    dividend. Without a usable quote an ITM call counts as at risk (fail safe)."""
+    if spot is None or not math.isfinite(spot):
+        return False, "no spot"
+    intrinsic = spot - call_strike
+    if intrinsic <= C.EXDIV_ITM_BUFFER:
+        return False, f"short call {call_strike:g} out of the money (spot {spot:.2f})"
+    if call is None or not call.quoted:
+        return True, f"short call {call_strike:g} ITM by {intrinsic:.2f}, no quote (fail safe)"
+    extrinsic = call.mid - intrinsic
+    if extrinsic < dividend:
+        return True, (f"short call {call_strike:g} ITM by {intrinsic:.2f}, extrinsic {extrinsic:.2f} "
+                      f"< dividend {dividend:.2f}")
+    return False, f"short call {call_strike:g} ITM, extrinsic {extrinsic:.2f} >= dividend {dividend:.2f}"
+
+
+def slippage(credit: bool, mid: float | None, fill: float | None) -> float | None:
+    """Per-share cost of the fill vs the planned mid: positive = worse than mid
+    (a credit received below the mid, or a debit paid above it)."""
+    if mid is None or fill is None:
+        return None
+    return round((mid - fill) if credit else (fill - mid), 4)
+
+
+def take_profit_debit(entry_mid: float) -> float:
+    """Resting take-profit price: the research rule, cost to close <= entry mid * (1 - TAKE_PROFIT),
+    rounded down to the tick (never above the rule's price), at least one tick."""
+    return round(max(_floor_tick(entry_mid * (1 - C.TAKE_PROFIT)), C.TICK), 2)

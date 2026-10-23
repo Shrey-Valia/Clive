@@ -34,7 +34,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "SHORTING_ENV_PATH", tmp_path / "shorting.env")
     monkeypatch.setattr(C, "ENV_PATH", tmp_path / "options.env")
     beats = []
-    monkeypatch.setattr(db, "heartbeat", lambda st, msg: beats.append((st, msg)))
+    monkeypatch.setattr(db, "heartbeat", lambda st, msg, **k: beats.append((st, msg)))
     monkeypatch.setattr(db, "insert", lambda *a, **k: [])
     monkeypatch.setattr(db, "update", lambda *a, **k: None)
     return SimpleNamespace(tmp=tmp_path, beats=beats)

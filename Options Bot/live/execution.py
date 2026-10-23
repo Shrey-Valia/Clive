@@ -62,6 +62,7 @@ class Job:
     cutoff_price: float | None = None # exits: aggressive price used at the cutoff
     meta: dict = field(default_factory=dict)
     sleeve: str = C.SLEEVE_DIP        # "dip" | "condor": client_order_id "options-<sleeve>-..."
+    on_submit: object = None          # callable(job, client_order_id), run BEFORE each submit (inflight journal)
     # ---- runtime
     order_id: str | None = None       # the order currently working (None when settled)
     step: int = 0
@@ -166,6 +167,11 @@ def _submit(broker, job: Job, price: float, clock: Clock) -> None:
         return
     cid = client_order_id(job.sleeve, job.purpose, job.key, len(job.cids))
     job.cids.append(cid)
+    if job.on_submit is not None:               # write-ahead: the id is on disk before the order can exist
+        try:
+            job.on_submit(job, cid)
+        except Exception as e:                  # noqa: BLE001  (journaling must never block the order path)
+            log.error("%s %s: inflight journal failed: %s", job.purpose, job.key, e)
     try:
         o = broker.submit_mleg(job.legs, n, job.signed(price), cid)
     except Exception as e:                      # noqa: BLE001
