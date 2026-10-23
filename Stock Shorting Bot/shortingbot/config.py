@@ -81,6 +81,8 @@ CUTOFF_MINUTES_BEFORE_CLOSE = 2  # refuse to send orders after 15:58
 FILL_WAIT_SECONDS = 30           # wait this long for covers to fill before shorting
 SCAN_TIMEOUT_SECONDS = 25 * 60   # v2 scan runs beside the 15:55 cover; give up on it after this
 COVER_EXTRA_PASSES = 2           # shorts still open after the first cover pass: cancel, re-read, re-send, up to this many times
+LEFTOVER_FILL_WAIT_SECONDS = 150 # leftover covers (no close cutoff nearby): Alpaca paper took 1-3 min to fill opening market orders on 2026-10-23
+CANCEL_WAIT_SECONDS = 30         # wait this long for a cancel to land; paper took ~19 s on 2026-10-23
 ALPACA_TIMEOUT_SECONDS = 15      # every Alpaca HTTP call (alpaca-py sets none)
 
 # Next-open entry (v2). cron starts `daily.py --open --execute` at 09:31.

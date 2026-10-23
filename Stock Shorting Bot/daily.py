@@ -524,7 +524,7 @@ def exit_longs(run_id, execute: bool, deadline: dt.datetime, purpose: str = "lon
                 failed = True
                 log.warning("cancel open orders failed: %s", e)
             try:
-                if not broker.wait_no_open_orders(symbols):
+                if not broker.wait_no_open_orders(symbols, config.CANCEL_WAIT_SECONDS):
                     still_open = set(broker.open_order_symbols(symbols))
             except Exception as e:
                 log.warning("could not check open orders: %s", e)
@@ -738,7 +738,8 @@ def enter_longs(a, today: str, run_id, trade_date, picks: list[dict] | None, cut
 
 # ---------------------------------------------------------------- v2: short_intraday, 15:40 job
 def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None,
-              purpose: str = "cover", only: set[str] | None = None, tag: str = "") -> dict:
+              purpose: str = "cover", only: set[str] | None = None, tag: str = "",
+              fill_wait: int | None = None) -> dict:
     """Buy back every open short. Returns {"planned", "sent", "problems", "left"}.
 
     Each pass cancels the open orders on the names (and on `also_cancel`, today's entries, the
@@ -748,6 +749,7 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
     COVER_EXTRA_PASSES more before the cutoff. If holdings can't be re-read after cancelling,
     nothing is sent: a stale quantity could buy past the short into a long.
     `only`: cover just these names (the leftovers), never another short. `tag`: order id tag.
+    `fill_wait`: seconds to wait for each pass's fills (default FILL_WAIT_SECONDS).
     """
     db.set_step("cover")
     keep = (lambda t: True) if only is None else (lambda t: t in only)
@@ -790,7 +792,7 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
                 out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff - covers not sent")
                 out["left"] = {c["ticker"]: -c["qty"] for c in covers}
                 break
-            sent, pdt = send_orders(covers, wait=config.FILL_WAIT_SECONDS, attempt=attempt, tag=tag)
+            sent, pdt = send_orders(covers, wait=fill_wait or config.FILL_WAIT_SECONDS, attempt=attempt, tag=tag)
             out["sent"] += sent
             record_orders(run_id, sent)
             try:
@@ -832,7 +834,7 @@ def fresh_covers(symbols: list[str], purpose: str, planned: list[dict],
         cancel_failed = True
         log.warning("cancel open orders failed: %s", e)
     try:
-        if not broker.wait_no_open_orders(symbols):
+        if not broker.wait_no_open_orders(symbols, config.CANCEL_WAIT_SECONDS):
             still_open = set(broker.open_order_symbols(symbols))
     except Exception as e:
         log.warning("could not check open orders: %s", e)
@@ -909,7 +911,8 @@ def cover_leftovers(run_id, today: str, execute: bool, cutoff: dt.datetime, tag:
         return {"planned": [], "sent": [], "problems": [], "left": {}, "leftovers": {}}
     log.warning("leftover check%s: %d shorts from an earlier session %s - covering", when, len(left), left,
                 extra=MILESTONE)
-    out = cover_all(run_id, execute, cutoff, purpose="leftover", only=set(left), tag=tag)
+    out = cover_all(run_id, execute, cutoff, purpose="leftover", only=set(left), tag=tag,
+                    fill_wait=config.LEFTOVER_FILL_WAIT_SECONDS)
     out["leftovers"] = left
     for p in out["problems"]:
         log.error("leftover cover problem: %s", p, extra={"step": "cover"})
