@@ -1308,7 +1308,7 @@ def check_host(p: Probe):
     # uptime ------------------------------------------------------------------------------
     try:
         if platform.system() == "Darwin":
-            raw = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
+            raw = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
             boot = dt.datetime.fromtimestamp(int(re.search(r"sec = (\d+)", raw).group(1)), ET)
         else:
             boot = p.now - dt.timedelta(seconds=float(Path("/proc/uptime").read_text().split()[0]))
