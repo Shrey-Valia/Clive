@@ -1,0 +1,282 @@
+<title>Clive Round Three</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+{{STYLE}}
+<style>
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); max-width: 1120px; }
+.kpis > div { background: var(--panel); padding: 12px 14px; display: flex; flex-direction: column-reverse; gap: 2px; }
+.kpis b { font: 600 18px var(--f-mono); color: var(--ink); font-variant-numeric: tabular-nums; }
+.kpis span { font: 600 10px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); }
+.part { border-top: 2px solid var(--amber); padding-top: 18px; display: flex; flex-direction: column; gap: 8px; max-width: 1120px; }
+.part h2 { font-size: 28px; }
+.decide { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); max-width: 840px; }
+.decide > div { background: var(--panel); padding: 14px 18px; display: grid; grid-template-columns: 7.5em 1fr; gap: 6px 16px; align-items: baseline; }
+.decide .when { font: 700 11px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--warn); }
+.decide .when.now { color: var(--neg); }
+.decide b { font: 700 15px var(--f-mono); color: var(--ink); }
+.decide p { font-size: 14px; grid-column: 2; }
+@media (max-width: 520px) { .decide > div { grid-template-columns: 1fr; } .decide p { grid-column: 1; } }
+a { color: var(--amber); }
+.refs li { font-size: 14px; }
+</style>
+
+<div class="top"><span class="brand">CLIVE</span><span class="fn">RND3 &lt;GO&gt;</span><span>ROUND 3 RESEARCH &amp; BUILD · OCT 23, 2026</span><span>BRANCH round3-integration</span></div>
+<main>
+
+<section class="col">
+  <div class="eyebrow">Six agents, one day</div>
+  <h1>Clive Round Three</h1>
+  <p class="lede">Six agents tested and built improvements for both bots, each in an isolated copy of the code. None of it is live. The research found two things that change plans. The options bot as configured loses money over ten years. The shorting bot gives up much of its edge to the 09:31 fill and the 35% stop. On the build side, the bots can be made safe from a dead computer, and the server kit is tested and ready for DigitalOcean.</p>
+</section>
+
+<div class="kpis">
+  <div><b>7 branches</b><span>6 agents + 1 combined</span></div>
+  <div><b>279 / 156 / 50</b><span>shorting / options / engine tests</span></div>
+  <div><b>1,366</b><span>new backtest trials, all counted</span></div>
+  <div><b>0</b><span>changes to the live bots</span></div>
+</div>
+
+<section class="col">
+  <div class="eyebrow">Read this first</div>
+  <h2>Decisions for you</h2>
+  <div class="decide">
+    <div><span class="when now">Before Mon 15:45</span><b>Turn the SPY condor off</b>
+      <p>The condor shows no edge over 36 years of SPX history. Its perfect 15-for-15 backtest leaned on a strike-search bug that picked much safer calls than the live bot sells. It will try to open again Monday at 15:55, with up to $2,280 at risk for 56 days. It's a one-line change (<code>CONDOR_ENABLED = False</code>), and I'll make it only when you say so.</p></div>
+    <div><span class="when">Run-through</span><b>Shrink the options book to SPY dips at 10%</b>
+      <p>In a 10-year backtest of the current setup the worst drawdown is −67%. SPY-only at 10% risk per trade cuts it to −9.5%, and the worst crash replay goes from −49% to −11%. IWM's dip spread has no edge and doubles the drawdown.</p></div>
+    <div><span class="when">Run-through</span><b>Keep or drop the 35% stop on shorts</b>
+      <p>This one choice decides three things. Without the stop, the bot can short in the opening auction, which is the best backtest of the round: Sharpe 1.44 in-sample and 1.19 out-of-sample, against 1.14 and 0.81 today. Without the stop, a market-on-close cover can also sit with the exchange from 09:31, so the close no longer needs the computer to be on. The price: the worst single short becomes −71% instead of −37%. At 5% per name, that is −3.5% of the account.</p></div>
+    <div><span class="when">Run-through</span><b>Sell the overnight longs in the opening auction</b>
+      <p>This is an existing setting (<code>OVERNIGHT_LONG_EXIT_ORDER = "opg"</code>). Selling at the opening print instead of 09:31 lifts the sleeve's out-of-sample Sharpe from 0.74 to 0.99, because the 09:31 price averages 0.35% worse. It needs the 09:31 cron line moved to 09:20.</p></div>
+    <div><span class="when">Run-through</span><b>Build a trend sleeve for paper</b>
+      <p>The best new strategy: 20 ETFs, long or flat, rebalanced once a month. It made 7.1% a year out of sample with a −17% worst drawdown, and its correlation with the shorting bot is −0.01. The build spec is written, but nothing is built yet.</p></div>
+    <div><span class="when">This week</span><b>Create the DigitalOcean server</b>
+      <p>$6 a month, New York, Ubuntu 24.04. The steps are in <code>deploy/QUICKSTART_DIGITALOCEAN.md</code>. Send me the IP and I'll do the rest: setup, a shadow day, the compare check, then go live.</p></div>
+  </div>
+</section>
+
+<section class="col">
+  <h3>What each agent concluded</h3>
+  <div class="verdicts">
+    <div><span class="pill watch">CHANGE EXECUTION</span><b>Shorting signals</b><p>The signal is fine; the execution isn't. Every early exit tested hurts: tighter stops, trailing stops, targets, time exits and VWAP exits. No new selection feature, sizing rule or market-regime filter holds up in both periods.</p></div>
+    <div><span class="pill go">BUILT · OFF</span><b>Shorting execution</b><p>Exchange-staged closing orders in four modes, a cover loop that stops cancelling orders that are working, alert auto-clearing, and three bug fixes. The worst bug: most shorts were going out with no stop because the entry wait was too short.</p></div>
+    <div><span class="pill no">CUT IT DOWN</span><b>Options research</b><p>The current options book loses money over ten years. The condor has no edge; the SPY dip spread has a small one. Shrinking the book works better than buying a crash hedge.</p></div>
+    <div><span class="pill go">BUILT · OFF</span><b>Options engineering</b><p>Found why today's condor didn't fill and built a ladder that fixes it. Added an ex-dividend early-assignment guard, crash recovery for in-flight orders, phone alerts and slippage tracking.</p></div>
+    <div><span class="pill watch">1 GO · 1 WATCH</span><b>New patterns</b><p>168 trials across 12 families. Cross-asset trend is a GO for paper. QQQ intraday momentum is one to watch. Losers, gaps, opening-range breakouts, calendar effects, earnings drift, reversal and short interest all fail after costs.</p></div>
+    <div><span class="pill go">READY</span><b>Cloud, health, dashboard</b><p>The server kit passes 14 of 14 checks in Docker, and two security bugs are fixed. Also built: a shadow-compare tool, a 15:30 readiness alert, battery and lid checks, and the dashboard label fixes.</p></div>
+  </div>
+</section>
+
+<!-- ===================== SHORTING SIGNALS ===================== -->
+<div class="part"><div class="eyebrow">Part 1</div><h2>Shorting bot: the signal works, the fills don't</h2></div>
+<section class="col">
+  <p>This round re-ran v2 on minute bars, with spreads measured by time of day. It fetched 15,503 events, 2016–2026, delisted names included. The live bot isn't trading the strategy the original backtest approved. That backtest assumed an opening-print entry, no stop and an exit at the close. Live uses a 09:31 market order, a 35% stop and a 15:55 market cover. The spread on these names is 40–44 bps at the open and 15 bps near the close, so the 09:31 fill is the expensive one.</p>
+</section>
+<section class="col" style="max-width:1120px">
+  <div class="scroll"><table>
+    <thead><tr><th>Configuration</th><th class="n">In-sample Sharpe<br>2016–21</th><th class="n">Out-of-sample<br>2022–26</th><th class="n">Costs ×2 (OOS)</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td>v2 as live today: 09:31 market, 35% stop, 15:55 market</td><td class="n">1.14</td><td class="n">0.81</td><td class="n">0.48</td><td class="why">Baseline</td></tr>
+      <tr><td>No broker stop</td><td class="n">1.23</td><td class="n">1.01</td><td class="n">—</td><td class="why">Better, but the worst short goes from −37% to −71%</td></tr>
+      <tr><td>Opening-auction entry, stop kept</td><td class="n">1.37</td><td class="n">0.62</td><td class="n">—</td><td class="why"><span class="neg">Worse:</span> first-minute spikes trip the stop</td></tr>
+      <tr><td><b>Opening-auction entry, no stop, close exit (v2.1)</b></td><td class="n pos">1.44</td><td class="n pos">1.19</td><td class="n">1.01</td><td class="why"><span class="pos">Best of the round</span>, if you accept the tail</td></tr>
+      <tr><td>Enter at 09:35 / 09:45 / 10:00</td><td class="n">1.37 / 1.27 / 1.23</td><td class="n">0.59 / 0.50 / 0.01</td><td class="n">—</td><td class="why">No. Out of sample, the fade starts at the open</td></tr>
+      <tr><td>Hard stops 5–25%, trailing stops, targets, 12:00/14:00 exits</td><td class="n">≤ 1.17</td><td class="n">−1.12 to 0.86</td><td class="n">—</td><td class="why">No. Every early exit cuts the all-day fade</td></tr>
+      <tr><td>Score with relative-volume weight 0</td><td class="n">1.13</td><td class="n">1.38</td><td class="n">—</td><td class="why">Watch: flat in-sample, better out of sample</td></tr>
+      <tr><td>Long sleeve: sell at the opening auction (vs 09:31)</td><td class="n">0.80 (0.33)</td><td class="n">0.99 (0.74)</td><td class="n">—</td><td class="why"><span class="pos">Go</span>, an existing setting</td></tr>
+      <tr><td><b>Combined: v2.1 short + auction sleeve exit</b> (vs today's combined book)</td><td class="n pos">1.45 (1.11)</td><td class="n pos">1.32 (1.04)</td><td class="n">1.10 (0.67)</td><td class="why">The recommended package</td></tr>
+    </tbody>
+    <caption>Sharpe ratios annualised on all trading days, net of time-of-day spreads, impact, fees and borrow; 5% per name. 1,240 trials counted in total. On the strictest deflation every configuration scores about 0, including the original v2 approval, so read the ranking, not the absolute numbers.</caption>
+  </table></div>
+  <figure><img src="{{IMG_SHORT_EQUITY}}" alt="Equity curves 2016–2026 for v2 as live, no stop, auction with stop, auction without stop, and two score variants; auction without stop and the relative-volume score end highest.">
+  <figcaption>Equity on 5% per name, net of costs. The dotted line marks where out-of-sample begins. Orange is v2 as it trades today; blue is the auction entry without the stop.</figcaption></figure>
+</section>
+<section class="col">
+  <h3>What a squeeze day looks like</h3>
+  <ul>
+    <li>The worst shorts are mostly all-day grinds that peak in the last hour. BTBT peaked at 15:51; FLNA, BLNK, IOVA and VERU all peaked after 15:20.</li>
+    <li>Only 30% of the trades that ran +20% against the short peaked before 10:00. A fifth of them still finished in profit.</li>
+    <li>A stop "saves" fewer return points than it costs at every level from 5% to 50%, in both periods. That fits Kaminski and Lo: stops only help when returns trend, and this fade mean-reverts during the day.</li>
+    <li>Capacity: at 5% per name, a 09:31 market order stops being small somewhere around $1–2M of equity. That's far away.</li>
+  </ul>
+</section>
+
+<!-- ===================== SHORTING EXECUTION ===================== -->
+<div class="part"><div class="eyebrow">Part 2</div><h2>Shorting bot: a close that survives a dead computer</h2></div>
+<section class="col">
+  <p>The plan was to send the 15:55 cover to the exchange in the morning as a market-on-close order, so it fills even if the Mac dies. Alpaca makes that harder than it sounds:</p>
+  <ul>
+    <li><b>A stop and a market-on-close cover can't both sit on the same shares.</b> The second one is rejected for insufficient quantity. This comes from Alpaca forum posts by staff and users, so it's the first thing to confirm on paper with 1 share.</li>
+    <li><b>Closing orders are refused from 15:50 to 19:00.</b> Paper fills them at the closing quote, not the auction price, and can fill part and let the rest expire.</li>
+    <li><b>A live account may need Alpaca's "elite" routing</b> for these orders. Check before going live.</li>
+  </ul>
+  <div class="scroll"><table>
+    <thead><tr><th>Mode (<code>STAGED_MOC_COVER</code>)</th><th>What it does</th><th>Trade-off</th></tr></thead>
+    <tbody>
+      <tr><td><code>off</code> (default)</td><td class="why">Today's behaviour</td><td class="why">The close needs the computer at 15:55</td></tr>
+      <tr><td><code>handoff</code> (recommended with the stop)</td><td class="why">Stop until 14:00, then cancel it and stage the whole short as a closing order</td><td class="why">No stop for the last two hours. Needs the computer once between 14:00 and 15:49. Would have saved Oct 22.</td></tr>
+      <tr><td><code>split</code></td><td class="why">Half the shares carry the stop, half the closing order</td><td class="why">Half the position still depends on the 15:55 run</td></tr>
+      <tr><td><code>full</code></td><td class="why">A closing order for every share from 09:31, no stop</td><td class="why">Fully independent of the computer. It pairs naturally with the no-stop v2.1 in Part 1.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>Bug fixes (on when merged)</h3>
+  <ul>
+    <li><b>Entries waited only 30 s for fills</b> before placing stops. Paper took 1–3 minutes at the open, so most shorts would have had <i>no stop at all</i>. Entries now wait up to 150 s, and a stop is never sent against an entry that's still working.</li>
+    <li><b>Stop repair:</b> the 10:00, 12:00 and 14:00 runs now give a stop to any of today's shorts that's missing one.</li>
+    <li><b>One Alpaca error at 15:55 failed the whole close job</b> after it had marked itself started, so the 15:50 fallback stood aside and nothing covered. The cover now retries every 10 s until the cutoff.</li>
+  </ul>
+  <p class="dim">Also built, all off: a cover loop that never cancels a working order (today's false alarm), marketable-limit collars for entries and covers, and auto-clearing of one-off alerts. 266 tests on its branch.</p>
+</section>
+
+<!-- ===================== OPTIONS RESEARCH ===================== -->
+<div class="part"><div class="eyebrow">Part 3</div><h2>Options bot: the short sample flattered it</h2></div>
+<section class="col">
+  <p>The agent rebuilt option prices back to 2016 for SPY and 1990 for SPX, using a volatility surface fitted to 3.5 million real Alpaca prints. Checked against real chains, it matched all 55 real dip trades, with trade P&amp;L correlation of 0.79–0.94. Checked against Cboe's PUT and PPUT indexes from 2007, monthly correlation was 0.98–0.99. If anything it runs slightly pessimistic on the dip.</p>
+</section>
+<section class="col" style="max-width:1120px">
+  <figure><img src="{{IMG_OPT_BOOK}}" alt="Options book equity 2016–2026 on a log scale: the live book falls to about 40% of starting capital by 2024; SPY-only at 10% stays near flat with small drawdowns.">
+  <figcaption>The options book on the rebuilt chain, Oct 2016 to Oct 2026, at $15k. Blue is the live configuration. Green and purple are SPY-only at 10% risk.</figcaption></figure>
+  <div class="scroll"><table>
+    <thead><tr><th>Configuration ($15k, 2016–2026)</th><th class="n">CAGR</th><th class="n">Sharpe</th><th class="n">Max DD</th><th class="n">COVID replay</th><th class="n">−10% gap from calm</th></tr></thead>
+    <tbody>
+      <tr><td>Live: condor 20% + dip SPY/IWM 25% each</td><td class="n neg">−4.7%</td><td class="n">−0.10</td><td class="n neg">−67%</td><td class="n neg">−48.9%</td><td class="n neg">−42%</td></tr>
+      <tr><td>Dip SPY + IWM, no condor</td><td class="n">0.7%</td><td class="n">0.15</td><td class="n">−51%</td><td class="n">—</td><td class="n">—</td></tr>
+      <tr><td>Dip SPY only, 25%</td><td class="n">3.4%</td><td class="n">0.32</td><td class="n">−25%</td><td class="n">—</td><td class="n">—</td></tr>
+      <tr><td><b>Dip SPY only, 10% (recommended)</b></td><td class="n">0.9%</td><td class="n">0.25</td><td class="n pos">−9.5%</td><td class="n pos">−8.9%</td><td class="n">≈ −11%</td></tr>
+    </tbody>
+    <caption>Every candidate has a deflated Sharpe of 0 against 995 trials. The recommendation rests on stress, not on return: the SPY dip at 10% is the only setup inside the institutional review's 15%-of-NAV stress budget.</caption>
+  </table></div>
+</section>
+<section class="col">
+  <ul>
+    <li><b>Condor:</b> 736 configurations on SPX back to 1990. The best scores 0.62 in-sample and 0.23 out-of-sample. The current rule (F1) scores 0.29 / −0.22, with 7 near-max losses in 213 trades. Profit-takes, 21-day exits, stops, VIX filters and skipping FOMC/CPI days all fail to rescue it.</li>
+    <li><b>Bug R3-1:</b> in 6 of 16 backtest condors, the "0.10-delta" short call was really 0.02–0.04 delta. With the fix, the same data shows 2 losses in 14 trades and Sharpe 0.49, not 1.07. The fix is in the engine behind <code>OPTIONSBOT_STRICT_DELTA=1</code>.</li>
+    <li><b>Dip spread:</b> keep the signal, structure and exits as they are. No variant survives deflation. Extra names don't help: 55–80% of DIA, QQQ, XLK and IJR signals land within 2 days of a SPY signal, so they add the same tail.</li>
+    <li><b>Tail hedge:</b> not at $15k. 1% a year in SPY put spreads cut COVID from −29% to −23% and did nothing for Feb 2018 or Aug 2024. A one-lot standing hedge costs 4–6% a year. VIX calls helped most, but Alpaca can't trade them.</li>
+    <li><b>The shorting bot isn't part of the gap problem.</b> It held no positions on the key crash days, and its correlation with SPY on big down days is −0.31. Its risk is single-name squeezes.</li>
+  </ul>
+</section>
+
+<!-- ===================== OPTIONS ENGINEERING ===================== -->
+<div class="part"><div class="eyebrow">Part 4</div><h2>Options bot: why today's condor didn't fill</h2></div>
+<section class="col">
+  <p>At 15:55 today the bot tried 1× SPY Dec-18 650/675 · 814/835. Mid was 2.29 and natural 2.13. It stepped from 2.28 down to 2.20 and cancelled at 15:57. Alpaca paper only fills a combo that is marketable against the national best bid and offer, with no price improvement, and the ladder stops halfway to natural, so it can only fill if the market moves. The backtest assumed about $2.09, so filling at natural is still better than the research assumed.</p>
+  <ul>
+    <li><b>Fix (off):</b> <code>CONDOR_ENTRY_LADDER = "natural"</code>, and the same for dips. It walks from mid to natural and never accepts less than the backtest credit. <code>CONDOR_ENTRY_EARLY</code> adds a first attempt from 15:46. The options research suggests not loosening the condor at all and turning it off instead. The ladder fix still matters for the dip spreads.</li>
+    <li><b>Ex-dividend guard (on when merged):</b> the condor's Dec 18 expiry is SPY's ex-dividend date. An in-the-money short call can be exercised early the day before, which is exactly the bot's planned close day. The guard closes the condor on the last session before an ex-date when the call is in the money and its time value is below the dividend.</li>
+    <li><b>A dead computer can't leave half a spread:</b> Alpaca fills multi-leg orders all together or not at all. What a crash used to lose was the bookkeeping. A write-ahead journal now records each order before it's sent, and the next run books what filled.</li>
+    <li><b>Also built:</b>
+      <ul>
+        <li>Options alerts to your phone.</li>
+        <li>Slippage against mid and natural on every order.</li>
+        <li>A fix for the 16:15 sync overwriting a 15:55 error with "ok".</li>
+        <li>A fix for the final-sweep log level that made today's clean cancel look like a failed run.</li>
+        <li>Resting take-profit and expiry orders (off until tested on paper).</li>
+      </ul></li>
+  </ul>
+  <p class="dim">156 tests on its branch. The sizing check confirms it: 1 condor = $2,283 max loss = 15.2% of $15k, and Alpaca's margin requirement is $2,500.</p>
+</section>
+
+<!-- ===================== PATTERNS ===================== -->
+<div class="part"><div class="eyebrow">Part 5</div><h2>New strategies: one diversifier worth paper-trading</h2></div>
+<section class="col" style="max-width:1120px">
+  <div class="scroll"><table>
+    <thead><tr><th>Candidate</th><th class="n">In-sample</th><th class="n">Out-of-sample</th><th class="n">Max DD</th><th class="n">ρ short bot</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td><b>Cross-asset trend, long/flat</b>: 20 ETFs, monthly, 1/3/12-month blend</td><td class="n">0.86 (2001–15)</td><td class="n pos">0.84 (2016–26)</td><td class="n">−17%</td><td class="n">−0.01</td><td class="why"><span class="pill go">GO</span> paper sleeve; spec written</td></tr>
+      <tr><td>Noise-band intraday momentum, QQQ</td><td class="n">0.91</td><td class="n">1.42</td><td class="n">−15%</td><td class="n">0.01</td><td class="why"><span class="pill watch">WATCH</span> fails on 9 of 13 other ETFs; one bad tick of cost kills it</td></tr>
+      <tr><td>Overnight-only ETF long, IWM</td><td class="n">0.72</td><td class="n">0.48–0.83</td><td class="n">−30%</td><td class="n">−0.05</td><td class="why"><span class="pill watch">WATCH</span> cost-dependent; long beta</td></tr>
+      <tr><td>12-1 stock momentum, long/short</td><td class="n">0.35</td><td class="n">0.52</td><td class="n">−37%</td><td class="n">0.02</td><td class="why"><span class="pill watch">WATCH</span> loses on the short bot's worst days</td></tr>
+      <tr><td>Top losers, gap fills, 5-min ORB, Gao intraday momentum, calendar, earnings drift, reversal, short interest, 52-week high, tug of war</td><td class="n">—</td><td class="n">≤ 0.52</td><td class="n">—</td><td class="n">—</td><td class="why"><span class="pill no">NO</span> fail after costs, or are just beta</td></tr>
+    </tbody>
+    <caption>168 trials across 12 families, all counted; no candidate clears a deflated Sharpe of 0.95. Trend's GO rests on a century of literature (Moskowitz–Ooi–Pedersen; Hurst–Ooi–Pedersen), a spec fixed before the out-of-sample run, and robustness: costs ×3 still gives 0.77, and dropping any one ETF gives 0.77–0.89.</caption>
+  </table></div>
+</section>
+<section class="col">
+  <ul>
+    <li><b>Why trend fits:</b> every current sleeve sells insurance and loses in the same states. Trend is mildly long convexity at monthly horizons: +1.6% in 2008 and +2.9% in 2022. Short bot alone: Sharpe 1.31, worst month −7.0%. Half and half with trend: 1.52 and −3.4%.</li>
+    <li><b>What it won't do:</b> hedge fast gap crashes. It lost 6.9% in Feb 2018, 6.3% in March 2020 and 5.3% in April 2025.</li>
+    <li><b>How it would run:</b> one 15:40 job that acts on the last trading day of each month. It trades at the close with MOC orders, uses about 40% of equity, and turns over about 9 times a year. The plan is a month of shadow mode, then six months on paper.</li>
+  </ul>
+</section>
+
+<!-- ===================== CLOUD ===================== -->
+<div class="part"><div class="eyebrow">Part 6</div><h2>Cloud, health, dashboard</h2></div>
+<section class="col">
+  <ul>
+    <li><b>Server kit:</b> works as <code>root</code> (DigitalOcean, Hetzner) or <code>ubuntu</code> (Oracle), on x86 and ARM, with 1 GB of RAM plus 2 GB swap. Tested in Ubuntu 24.04 containers: 14 of 14 checks under systemd, all 17 timers firing on New York time, and every bot test suite passing inside the server's Python.</li>
+    <li><b>Two security bugs fixed:</b> DigitalOcean's own SSH settings would have quietly kept password logins on. Setup also failed when run from <code>/root</code>.</li>
+    <li><b>Shadow compare:</b> after a shadow day on the server, one command compares picks, the 09:31 plan, the 15:55 cover, the sleeve and the options decision against the Mac's real run. It prints PASS or FAIL, which is the evidence for switching to live.</li>
+    <li><b>Health:</b>
+      <ul>
+        <li>A 15:30 readiness check sends one urgent phone alert if anything would block the close.</li>
+        <li>New battery and lid checks.</li>
+        <li>Brief Supabase errors are now "unknown", not "migration missing".</li>
+        <li>One-off alerts clear themselves.</li>
+      </ul></li>
+    <li><b>Dashboard:</b> the shorting page shows the real next step: "NO PICKS FOR THE NEXT OPEN", "HOLDING 3 SHORTS · COVER 15:55". Best/worst day stays hidden until there are two days. There's a new options card for the next decision and the sleeves. The build passes, but it's not deployed yet.</li>
+  </ul>
+</section>
+
+<!-- ===================== INTEGRATION ===================== -->
+<div class="part"><div class="eyebrow">Part 7</div><h2>Putting it together</h2></div>
+<section class="col">
+  <p>I merged all six branches into <code>round3-integration</code>. Three files conflicted, all in the shorting bot, where the auction entry and the staged closing orders touch the same lines. I kept both sides and ran every suite. Shorting passes 279, options 156, the research engine 50, health 23 and shadow compare 23, and the dashboard builds. Two database changes were both numbered 009, so the options one is now 010.</p>
+  <h3>What changes the moment it's merged</h3>
+  <p>Everything is off except these safety fixes:</p>
+  <ul>
+    <li>Shorting: the 150 s entry wait before stops, stop repair, the 15:55 cover retry, and the 5xx order lookup.</li>
+    <li>Options: the in-flight order journal, the SPY ex-dividend guard, alerts, and the sync status fix.</li>
+    <li>Health and dashboard: everything in Part 6.</li>
+  </ul>
+  <h3>Suggested order for the run-through</h3>
+  <ol class="steps">
+    <li>Decide on the condor. If you're unsure, turn it off before Monday 15:45 and decide later.</li>
+    <li>Create the DigitalOcean server. I set it up, run one or two shadow days with the compare check, then switch it to live in an evening.</li>
+    <li>Merge <code>round3-integration</code>, apply migrations 009 and 010, and deploy the dashboard.</li>
+    <li>Day 0 on paper: test Alpaca's three order rules with 1 share. Does a stop block a closing order? Does an opening-auction short get accepted? What's the closing-order cutoff on half days?</li>
+    <li>Choose the shorting package. <b>Keep the stop:</b> move only the sleeve exit to the opening auction and use the <code>handoff</code> close. <b>Drop the stop:</b> use the auction entry, the <code>full</code> close and the auction sleeve exit.</li>
+    <li>Options: SPY-only dips at 10% risk with the <code>natural</code> ladder.</li>
+    <li>Later: build the trend sleeve in shadow mode.</li>
+  </ol>
+</section>
+
+<section class="col">
+  <div class="eyebrow">From today</div>
+  <h2>Live notes, Oct 23</h2>
+  <ul>
+    <li><b>Shorting:</b> the 5 shorts held from Oct 21 were bought back at 09:32–09:34 for +$55.87 on the trade. At Oct 22's close they had been up about $371, so the missed cover cost about $315. The close scan found no name scoring 70 or higher, so there are no picks for Monday.</li>
+    <li><b>Options:</b> no dip signal (SPY RSI2 15; IWM below its 200-day). The condor attempt didn't fill (Part 4).</li>
+    <li><b>The Mac slept during market hours four times:</b> 09:52–10:03, 10:58–13:42, 15:26–15:35 and 16:09–16:22, with the lid closed each time. It woke 5 minutes before the 15:40 run and slept through both 16:15 syncs, which I re-ran by hand. Until the server is live: lid open, plugged in, 09:20–16:20.</li>
+    <li><b>Phone alerts</b> go to the ntfy topic I sent you. Subscribe in the ntfy app so you get them.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Read before acting</div>
+  <h2>Caveats</h2>
+  <ul>
+    <li><b>Multiple testing.</b> Under the strictest deflation, nothing this round, and nothing from earlier rounds, is statistically proven. The recommendations lean on how robust a result is, on the literature, and on stress. They don't lean on headline Sharpe.</li>
+    <li><b>Alpaca behaviour is partly undocumented:</b> closing-order quantity reservation, opening-auction short acceptance, resting GTC option orders and half-day cutoffs. Every flag that depends on these stays off until a 1-share paper test passes.</li>
+    <li><b>No historical borrow data.</b> Squeeze names were probably hard to borrow, and that isn't modelled.</li>
+    <li><b>Paper fills aren't live fills.</b> Paper fills closing orders at the closing quote and combos only at natural. Live behaviour will differ in both directions.</li>
+  </ul>
+</section>
+
+<section class="col">
+  <div class="eyebrow">Where everything is</div>
+  <h2>Files and branches</h2>
+  <ul>
+    <li><code>round3-integration</code>: all six merged, tests passing. This is what we'd review and merge.</li>
+    <li>Shorting signals: <code>Stock Shorting Bot/research/round3/REPORT.md</code>, plus the <code>ROUND3_SHORT_ENTRY_ORDER</code> flag.</li>
+    <li>Shorting execution: <code>Stock Shorting Bot/docs/EXECUTION_ROUND3.md</code>, including the paper test plan.</li>
+    <li>Options research: <code>Options Bot/tuning/round3/REPORT.md</code>.</li>
+    <li>Options engineering: <code>Options Bot/docs/ENGINEERING_ROUND3.md</code>, including a 14-step paper checklist.</li>
+    <li>New patterns: <code>Research/round3_patterns/REPORT.md</code> and <code>BUILD_SPEC.md</code>.</li>
+    <li>Cloud: <code>deploy/QUICKSTART_DIGITALOCEAN.md</code>, <code>deploy/ROUND3_NOTES.md</code>, <code>deploy/shadow_compare.sh</code>.</li>
+    <li>Earlier reports: <a href="https://claude.ai/artifact/HfeAegS3zBozWDDfWFxxYW">Clive Night Two</a>, <a href="https://claude.ai/artifact/J36vu8Fw3Ta4LSyH4z5QMY">Clive Research Report</a>.</li>
+  </ul>
+</section>
+</main>
+<footer><p>Hypothetical backtests and paper trading, not investment advice. Journal citations in each agent's report were resolved through LibKey with Northeastern access links where available; working papers are marked as not LibKey-resolved. Nothing in this round was deployed, pushed, or switched on.</p></footer>
