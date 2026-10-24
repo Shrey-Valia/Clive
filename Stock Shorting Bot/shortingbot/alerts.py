@@ -103,3 +103,56 @@ def resolve_cleared(kind: str, still_true: set[str | None]) -> list[str]:
 
 def open_alerts() -> dict:
     return _load()
+
+
+# ---------------------------------------------------------------- event alert hygiene
+# Event alerts (one row per event, never deduped) have no condition to clear, so before
+# config.AUTO_RESOLVE_EVENT_ALERTS they stayed open on the dashboard forever. Two rules:
+#   * a state kind resolves when a later check confirms the state is clean again:
+#     SHORT_STATE_KINDS once no short from an earlier session is open (daily.py's leftover check,
+#     sync.py when the book holds no short after the close), LONG_STATE_KINDS once no sleeve
+#     long from an earlier session is open (sync.py);
+#   * every other event kind resolves at the 16:15 sync once its session is over (raised before
+#     today, ET). The run_events log keeps the history.
+# Condition alerts monitor.py tracks in alerts_state.json (dedupe=True) are never swept here:
+# their own resolve_cleared() owns them, and sweeping their row would leave the state stale.
+SHORT_STATE_KINDS = frozenset({"cover_failed", "cover_blocked", "close_missed", "overnight_leftover",
+                               "leftover_covered", "moc_cover_failed"})
+LONG_STATE_KINDS = frozenset({"long_exit_failed", "long_exit_late"})
+CONDITION_KINDS = frozenset({"position_loss", "book_loss", "long_loss", "long_outside_window"})
+
+
+def _tracked_ids() -> list[str]:
+    return sorted(str(v["id"]) for v in _load().values() if isinstance(v, dict) and v.get("id") is not None)
+
+
+def resolve_events(kinds, before: dt.datetime | None = None, note: str = "",
+                   exclude_kinds=frozenset()) -> int:
+    """Resolve open event alerts of `kinds` (None = every kind but `exclude_kinds` and
+    CONDITION_KINDS) raised before `before` (default now). Off unless
+    config.AUTO_RESOLVE_EVENT_ALERTS. Returns rows resolved. Never raises."""
+    try:
+        if not config.AUTO_RESOLVE_EVENT_ALERTS or not db.enabled():
+            return 0
+        before = before or dt.datetime.now(dt.timezone.utc)
+        params = {"bot_id": f"eq.{db.BOT_ID}", "resolved_at": "is.null", "at": f"lt.{before.isoformat()}"}
+        if kinds is None:
+            skip = sorted(set(exclude_kinds) | CONDITION_KINDS)
+            params["kind"] = f"not.in.({','.join(skip)})"
+        else:
+            kinds = sorted(set(kinds))
+            if not kinds:
+                return 0
+            params["kind"] = f"in.({','.join(kinds)})"
+        tracked = _tracked_ids()
+        if tracked:
+            params["id"] = f"not.in.({','.join(tracked)})"
+        rows = db.update_where("alerts", params, {"resolved_at": dt.datetime.now(dt.timezone.utc),
+                                                  "resolution": note[:300] or None})
+        if rows:
+            log.info("alerts auto-resolved: %d (%s) - %s", len(rows),
+                     ", ".join(sorted({r.get("kind") or "?" for r in rows})), note or "-")
+        return len(rows)
+    except Exception as e:
+        log.warning("auto-resolving alerts failed: %s", e)
+        return 0

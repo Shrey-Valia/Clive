@@ -8,6 +8,8 @@
   - round-trip trades rebuilt from every fill since config.TRACK_FROM, each tagged with
     the run_id of the order that opened it (from short_orders)
   - one sync_runs row
+  - config.AUTO_RESOLVE_EVENT_ALERTS: resolves event alerts whose session is over, the leftover /
+    cover-failure alerts once the book holds no short, and condition alerts on names no longer held
   - heartbeat: writes bots.last_sync_status / last_sync_at only. run_state becomes the worse
     of the run and the sync, so a clean sync no longer hides a failed run.
 """
@@ -20,7 +22,8 @@ from collections import defaultdict, deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from shortingbot import broker, config, db, risk  # noqa: E402
+from shortingbot import alerts, broker, config, db, risk  # noqa: E402
+import daily  # noqa: E402
 from daily import log, setup_logging  # noqa: E402
 
 
@@ -79,6 +82,57 @@ def tag_run_ids(trades: list[dict]) -> list[dict]:
     return out
 
 
+def moc_check(pos: list[dict], today: str) -> dict[str, float]:
+    """STAGED_MOC_COVER: a name staged for the closing auction today that is still short at 16:15
+    was not (fully) covered - paper fills cls orders at the closing quote and may expire part.
+    Critical moc_cover_failed; the 09:31 leftover cover buys it back. Returns {ticker: qty}."""
+    try:
+        st = daily.load_picks(daily.moc_state_path()) or {}
+        if st.get("date") != today:
+            return {}
+        staged = {o.get("ticker") for o in st.get("orders") or [] if o.get("id")}
+        left = {p["ticker"]: p["qty"] for p in pos if p["qty"] < 0 and p["ticker"] in staged}
+        if left:
+            alerts.raise_alert("moc_cover_failed", f"{today}: still short after the closing auction although an "
+                                                   f"MOC cover was staged: {left} - the 09:31 leftover cover buys "
+                                                   f"them back", level="critical")
+        return left
+    except Exception as e:
+        log.warning("MOC check failed: %s", e)
+        return {}
+
+
+def resolve_alerts(pos: list[dict], today: str) -> int:
+    """16:15: auto-resolve alerts the close made stale (config.AUTO_RESOLVE_EVENT_ALERTS).
+    Returns rows resolved. Never raises."""
+    if not config.AUTO_RESOLVE_EVENT_ALERTS:
+        return 0
+    try:
+        n = 0
+        midnight = dt.datetime.combine(dt.date.fromisoformat(today), dt.time(), broker.ET)
+        n += alerts.resolve_events(None, before=midnight, note="sync: the session is over",
+                                   exclude_kinds=alerts.SHORT_STATE_KINDS | alerts.LONG_STATE_KINDS)
+        shorts = {p["ticker"] for p in pos if p["qty"] < 0}
+        longs = {p["ticker"] for p in pos if p["qty"] > 0}
+        if not shorts:
+            n += alerts.resolve_events(alerts.SHORT_STATE_KINDS, note="sync: no short open after the close")
+        state = daily.load_picks(daily.long_state_path()) or {}
+        fresh = ({o.get("ticker") for o in state.get("orders") or [] if o.get("status") != "rejected"}
+                 if str(state.get("entry_date") or "") == today else set())
+        if longs <= fresh:
+            n += alerts.resolve_events(alerts.LONG_STATE_KINDS,
+                                       note="sync: no sleeve long left from an earlier session")
+        held = shorts | longs
+        cleared = alerts.resolve_cleared("position_loss", held)
+        cleared += alerts.resolve_cleared("long_loss", longs)
+        cleared += alerts.resolve_cleared("long_outside_window", set())   # after 15:55 a long is in its window
+        cleared += alerts.resolve_cleared("book_loss", {None} if pos else set())
+        return n + len(cleared)
+    except Exception as e:
+        log.warning("alert auto-resolve failed: %s", e)
+        return 0
+
+
 def main() -> int:
     setup_logging()
     broker.load_env()
@@ -98,6 +152,9 @@ def main() -> int:
         db.delete("positions", {"bot_id": db.BOT_ID})
         db.insert("positions", [{"bot_id": db.BOT_ID, **p, "updated_at": dt.datetime.now(dt.timezone.utc)}
                                 for p in pos])
+
+        moc_check(pos, today)
+        resolve_alerts(pos, today)
 
         fills = broker.fills(config.TRACK_FROM)
         trades = tag_run_ids(round_trips(fills))

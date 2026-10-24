@@ -99,6 +99,18 @@ On 2026-10-22 the Mac was offline from about 15:01 to 16:15 ET, the 15:40 job ne
 2. **Late wake.** If the `--open` job starts late (09:52, say), the leftovers are still covered (allowed up to the 15:58 cutoff), but entries are refused after 09:50 as before. `daily.py --cover-leftovers --execute` does the same cover at any time in market hours: cron runs it at 10:00, 12:00 and 14:00. Its order ids carry the run time (`v2-leftover-DATE-TICKER-n-L1000`) so a second pass is a new order.
 3. **The 15:50 fallback.** `daily.py --execute --fallback` exits 0 if today's close guard (`logs/last_execute.json`) is written (started or finished) or if `close.lock` is held by a live process (the 15:40 job holds it from 15:40 until it finishes). Otherwise it raises `close_fallback`, writes the started guard, covers all shorts at once (no wait for 15:45 or 15:55), runs the scan beside it and saves the picks, and buys the long sleeve if that is done before the 15:58 cutoff. It never double-covers: it and the 15:40 job share `close.lock` and the guard, and both send the same `v2-cover-DATE-TICKER-n` ids, which Alpaca rejects as duplicates. Started after the cutoff, it sends nothing and raises a critical `close_missed` alert.
 
+## Execution round 3 (2026-10-23, flags off)
+
+`docs/EXECUTION_ROUND3.md` has the findings, the design and the paper test plan. In short:
+
+- `STAGED_MOC_COVER` (`off` / `full` / `split` / `handoff`) stages a market-on-close buy-to-cover at Alpaca, so the closing auction covers the shorts even if the Mac is asleep at 15:55. Alpaca will not let a buy-stop and an MOC rest on the same shares, so each mode makes a different trade-off with the +35% stop. `daily.py --stage-moc --execute` is an optional cron job that hands the stop off to the MOC, or tops the MOC up.
+- `COVER_KEEP_WORKING`, `COVER_ORDER` and `ENTRY_ORDER` control open execution. The first is a cover loop that never cancels a working cover. The other two add a marketable limit with a collar.
+- `AUTO_RESOLVE_EVENT_ALERTS` auto-resolves stale event alerts at sync time, and leftover alerts once a later check finds no leftovers.
+- Three bug fixes are on by default:
+  - entries now wait up to `ENTRY_FILL_WAIT_SECONDS` for their fill before the stop goes out;
+  - `STOP_REPAIR` makes the catch-up runs give a stop to any of today's shorts that has none;
+  - the 15:55 cover retries when Alpaca errors, and an order POST that gets a 5xx is looked up by its client id.
+
 ## Controls in `config.py`
 
 | Setting | Default | What it does |

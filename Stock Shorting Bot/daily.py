@@ -40,6 +40,7 @@ import contextlib
 import datetime as dt
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -58,6 +59,7 @@ OPEN_GUARD = os.path.join(config.LOG_DIR, "last_open.json")     # 09:31 job
 DRY_PICKS_FILE = config.PICKS_FILE.replace(".json", ".dry_run.json")
 MILESTONE = {"milestone": True}
 ORDER_ID_SUFFIX = ""        # --force sets one, so a deliberate re-run doesn't collide with today's ids
+RUN_STARTED = dt.datetime.now(dt.timezone.utc)   # main() resets it; alerts raised by this run are not auto-resolved by it
 
 
 def setup_logging() -> None:
@@ -371,10 +373,12 @@ def is_pdt_error(e) -> bool:
 
 # ---------------------------------------------------------------- order sending
 def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0,
-                tag: str = "") -> tuple[list[dict], str | None]:
-    """Send market orders one by one. A rejected order is recorded and the rest go on, except
-    after a PDT rejection, which stops the batch. Returns (sent, pdt_message). `attempt` goes
-    into each client_order_id, so a later cover pass is a new order, not a duplicate."""
+                tag: str = "", extend_until: float | None = None) -> tuple[list[dict], str | None]:
+    """Send market orders one by one (an order with a "limit_price" goes as a DAY limit: the
+    collar modes). A rejected order is recorded and the rest go on, except after a PDT
+    rejection, which stops the batch. Returns (sent, pdt_message). `attempt` goes into each
+    client_order_id, so a later cover pass is a new order, not a duplicate. extend_until (epoch
+    seconds): keep polling past `wait` while the fills still move (broker.wait_filled_progress)."""
     sent, pdt = [], None
     for o in orders:
         if pdt:
@@ -382,10 +386,14 @@ def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0,
                          "status": "rejected", "purpose": o["purpose"], "error": "skipped after PDT rejection"})
             continue
         try:
-            sent.append({**broker.submit(o["ticker"], o["qty"], o["side"],
-                                         client_order_id=order_id(o["purpose"], o["ticker"], attempt, tag)),
-                         "purpose": o["purpose"]})
-            log.info("  %s %s %g (%s)", o["side"].upper(), o["ticker"], o["qty"], o["purpose"], extra=MILESTONE)
+            coid = order_id(o["purpose"], o["ticker"], attempt, tag)
+            if o.get("limit_price"):
+                r = broker.submit_limit(o["ticker"], o["qty"], o["side"], o["limit_price"], client_order_id=coid)
+            else:
+                r = broker.submit(o["ticker"], o["qty"], o["side"], client_order_id=coid)
+            sent.append({**r, "purpose": o["purpose"]})
+            log.info("  %s %s %g (%s)%s", o["side"].upper(), o["ticker"], o["qty"], o["purpose"],
+                     f" limit ${o['limit_price']:.2f}" if o.get("limit_price") else "", extra=MILESTONE)
         except Exception as e:                     # one rejected order must not stop the others
             log.error("  order rejected %s %s: %s", o["side"], o["ticker"], e)
             sent.append({"id": None, "ticker": o["ticker"], "side": o["side"], "qty": o["qty"],
@@ -398,7 +406,9 @@ def send_orders(orders: list[dict], wait: int | None = None, attempt: int = 0,
     ids = [s["id"] for s in sent if s.get("id")]
     if ids:
         try:
-            if wait:
+            if wait and extend_until:
+                states = broker.wait_filled_progress(ids, wait, extend_until, config.COVER_STALL_SECONDS)
+            elif wait:
                 states = broker.wait_filled(ids, wait)
             else:
                 time.sleep(5)
@@ -488,7 +498,7 @@ def long_record(run_id, sent: list[dict]) -> None:
 
 def exit_longs(run_id, execute: bool, deadline: dt.datetime, purpose: str = "long_exit",
                action: str = "sell", first_kind: str = "market", first_wait: float | None = None,
-               before_send=None) -> dict:
+               before_send=None, only: set[str] | None = None) -> dict:
     """Sell every long. Returns {"planned", "sent", "left", "problems"}.
 
     The cover_all pattern for the long side: each pass cancels open orders on the names, waits for
@@ -497,7 +507,7 @@ def exit_longs(run_id, execute: bool, deadline: dt.datetime, purpose: str = "lon
     unreadable after a cancel: nothing is sent (a stale qty could sell past the long into a short).
     Only the first pass may use first_kind ("opg"); later passes are DAY market orders."""
     db.set_step("long_exit")
-    held = retry(broker.signed_holdings, "positions")
+    held = {t: q for t, q in retry(broker.signed_holdings, "positions").items() if only is None or t in only}
     plan = strategy.plan_long_exits(held, purpose)
     log.info("long exit: %d longs open %s", len(plan), {p["ticker"]: p["qty"] for p in plan} or "{}", extra=MILESTONE)
     out = {"planned": plan, "sent": [], "left": {}, "problems": []}
@@ -739,8 +749,8 @@ def enter_longs(a, today: str, run_id, trade_date, picks: list[dict] | None, cut
 # ---------------------------------------------------------------- v2: short_intraday, 15:40 job
 def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None,
               purpose: str = "cover", only: set[str] | None = None, tag: str = "",
-              fill_wait: int | None = None) -> dict:
-    """Buy back every open short. Returns {"planned", "sent", "problems", "left"}.
+              fill_wait: int | None = None, keep_staged: bool = True) -> dict:
+    """Buy back every open short. Returns {"planned", "sent", "problems", "left", "staged", "working"}.
 
     Each pass cancels the open orders on the names (and on `also_cancel`, today's entries, the
     first time), so a protective stop can't fire against a cover, waits until none is open,
@@ -750,6 +760,10 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
     nothing is sent: a stale quantity could buy past the short into a long.
     `only`: cover just these names (the leftovers), never another short. `tag`: order id tag.
     `fill_wait`: seconds to wait for each pass's fills (default FILL_WAIT_SECONDS).
+    keep_staged: a staged market-on-close cover (STAGED_MOC_COVER) is left alone and only the
+    shares it does not reserve are covered; "staged" = {ticker: shares the closing auction
+    covers}, and "left" never counts them. False (the halt flatten): cancel those too.
+    COVER_KEEP_WORKING: see _cover_keep_working ("working" = shares a live cover still works).
     """
     db.set_step("cover")
     keep = (lambda t: True) if only is None else (lambda t: t in only)
@@ -757,13 +771,18 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
     covers = strategy.plan_cover(held, purpose)
     log.info("cover: %d shorts open %s", len(covers),
              {c["ticker"]: -c["qty"] for c in covers} or "{}", extra=MILESTONE)
-    out = {"planned": covers, "sent": [], "problems": [], "left": {}}
+    out = {"planned": covers, "sent": [], "problems": [], "left": {}, "staged": {}, "working": {}}
     if not execute:
         for c in covers:
             log.info("  DRY RUN would BUY %s %g (%s)", c["ticker"], c["qty"], purpose)
         return out
     with job_lock("close"):
         symbols = sorted({c["ticker"] for c in covers} | set(also_cancel or []))
+        if config.COVER_KEEP_WORKING:
+            _cover_keep_working(out, run_id, symbols, purpose, cutoff, keep, tag,
+                                fill_wait or config.FILL_WAIT_SECONDS, keep_staged)
+            _cover_problems(out)
+            return out
         for attempt in range(1 + config.COVER_EXTRA_PASSES):
             if attempt:
                 symbols = sorted(out["left"])
@@ -773,7 +792,8 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
                 log.warning("cover pass %d: still short %s", attempt + 1, out["left"], extra=MILESTONE)
             if not symbols:
                 break
-            covers, short_now = fresh_covers(symbols, purpose, covers, attempt)
+            staged: dict = {}
+            covers, short_now = fresh_covers(symbols, purpose, covers, attempt, keep_staged, staged)
             if covers is None:
                 why = "after cancelling orders" if not attempt else f"on cover pass {attempt + 1}"
                 out["problems"].append(f"positions unreadable {why} - covers not sent")
@@ -781,6 +801,7 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
                 alerts.raise_alert("cover_blocked", f"positions could not be re-read {why} on "
                                                     f"{', '.join(symbols)} - nothing sent", level="critical")
                 break
+            out["staged"].update(staged)
             if attempt == 0:
                 out["planned"] = covers
             if not covers:                        # flat, or only names whose orders won't go away
@@ -792,12 +813,14 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
                 out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff - covers not sent")
                 out["left"] = {c["ticker"]: -c["qty"] for c in covers}
                 break
+            if attempt == 0:
+                collar_covers(covers)
             sent, pdt = send_orders(covers, wait=fill_wait or config.FILL_WAIT_SECONDS, attempt=attempt, tag=tag)
             out["sent"] += sent
             record_orders(run_id, sent)
             try:
-                out["left"] = {t: q for t, q in retry(broker.signed_holdings, "positions").items()
-                               if q < 0 and keep(t)}
+                out["left"] = residual_shorts({t: q for t, q in retry(broker.signed_holdings, "positions").items()
+                                               if q < 0 and keep(t)}, out["staged"])
             except Exception as e:
                 log.warning("could not re-read positions after covering: %s", e)
                 out["left"] = {s["ticker"]: -s["qty"] for s in sent if s.get("status") != "filled"}
@@ -807,6 +830,11 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
                 break
             if not out["left"]:
                 break
+    _cover_problems(out)
+    return out
+
+
+def _cover_problems(out: dict) -> None:
     for s in out["sent"]:
         if s.get("status") == "filled":
             continue
@@ -814,47 +842,475 @@ def cover_all(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str]
             out["problems"].append(f"cover {s['ticker']} {s.get('status')}: {s.get('error') or ''}".strip())
         else:
             log.info("cover %s %s but the position is flat now (stop filled first?)", s["ticker"], s.get("status"))
+    if out.get("staged"):
+        log.info("left to the closing auction (staged MOC): %s", out["staged"], extra=MILESTONE)
+
+
+def residual_shorts(shorts: dict[str, float], staged: dict[str, float]) -> dict[str, float]:
+    """{ticker: qty < 0} of each short less the shares a staged MOC cover reserves."""
+    out = {}
+    for t, q in shorts.items():
+        r = q + (staged.get(t) or 0)
+        if r < -1e-9:
+            out[t] = r
     return out
 
 
+def collar_covers(covers: list[dict]) -> None:
+    """COVER_ORDER "limit_collar": the first pass becomes a DAY limit at ask x (1 + collar).
+    A name with no ask (or last) stays a market order."""
+    if config.COVER_ORDER != "limit_collar" or not covers:
+        return
+    try:
+        q = broker.quotes([c["ticker"] for c in covers])
+    except Exception as e:
+        log.warning("cover collar: quotes unavailable (%s) - market orders", e)
+        return
+    for c in covers:
+        ref = (q.get(c["ticker"]) or {}).get("ask") or (q.get(c["ticker"]) or {}).get("last")
+        if ref:
+            c["limit_price"] = round(ref * (1 + config.COVER_COLLAR_PCT / 100), 2)
+
+
+def staging_possible(today: str | None = None) -> bool:
+    """A staged MOC cover may be resting: the flag is on, or today's staged-MOC file exists
+    (the flag was turned off after the 09:31 run). Off and no file: the cover path is exactly
+    the old one (no extra Alpaca calls)."""
+    if config.STAGED_MOC_COVER != "off":
+        return True
+    st = load_picks(moc_state_path()) or {}
+    return st.get("date") == (today or dt.datetime.now(broker.ET).date().isoformat()) and bool(st.get("orders"))
+
+
+def staged_reservations(symbols: list[str]) -> dict[str, float] | None:
+    """{ticker: unfilled shares of open market-on-close buys}. None when unreadable."""
+    try:
+        out: dict[str, float] = {}
+        for o in broker.open_orders(symbols):
+            if broker.is_staged_moc(o):
+                out[o["ticker"]] = out.get(o["ticker"], 0) + o["remaining"]
+        return out
+    except Exception as e:
+        log.warning("open orders unreadable (%s) - staged MOC covers unknown; Alpaca's qty reservation "
+                    "rejects a cover for shares a staged MOC holds", e)
+        return None
+
+
 def fresh_covers(symbols: list[str], purpose: str, planned: list[dict],
-                 attempt: int = 0) -> tuple[list[dict] | None, dict]:
+                 attempt: int = 0, keep_staged: bool = True,
+                 staged_out: dict | None = None) -> tuple[list[dict] | None, dict]:
     """One cover pass's plan: cancel open orders on `symbols`, wait for them to go, re-read
-    holdings, plan covers for those names only. Returns (covers, {ticker: qty} still short).
+    holdings, plan covers for those names only. Returns (covers, {ticker: qty} still short and
+    not reserved by a staged MOC); staged_out is filled with {ticker: staged MOC shares}.
     A name whose order would not go away is skipped this pass. covers None = holdings
     unreadable after orders existed (or the cancel failed), or on any pass after the first:
     send nothing (`planned` is the first pass's full quantity, part of it may have filled).
-    Unreadable on the first pass with no orders found falls back to `planned`."""
+    Unreadable on the first pass with no orders found falls back to `planned`.
+    keep_staged (and staging_possible()): open MOC buys are neither cancelled nor waited for."""
+    keep = broker.is_staged_moc if keep_staged and staging_possible() else None
+    kw = {"keep": keep} if keep else {}
     found, cancel_failed, still_open = 0, False, set()
     try:
-        found = broker.cancel_open_orders(symbols)
+        found = broker.cancel_open_orders(symbols, **kw)
         if found:
             log.info("cancelled %d open orders (stops included) on %s", found, ", ".join(symbols), extra=MILESTONE)
     except Exception as e:
         cancel_failed = True
         log.warning("cancel open orders failed: %s", e)
     try:
-        if not broker.wait_no_open_orders(symbols, config.CANCEL_WAIT_SECONDS):
-            still_open = set(broker.open_order_symbols(symbols))
+        if not broker.wait_no_open_orders(symbols, config.CANCEL_WAIT_SECONDS, **({"ignore": keep} if keep else {})):
+            still_open = set(broker.open_order_symbols(symbols, **({"ignore": keep} if keep else {})))
     except Exception as e:
         log.warning("could not check open orders: %s", e)
         still_open = set(symbols) if (found or cancel_failed) else set()
     if still_open:
         log.warning("orders on %s still open after cancelling - no cover for them this pass", ", ".join(sorted(still_open)))
+    staged = (staged_reservations(symbols) or {}) if keep else {}
     try:
         held = retry(broker.signed_holdings, "positions after cancel")
     except Exception as e:
         log.error("could not re-read positions after cancelling: %s", e)
+        if staged_out is not None:
+            staged_out.update(staged)
         if found or cancel_failed or attempt > 0:
             return None, {}
         planned = [c for c in planned if c["ticker"] in symbols]
-        return [c for c in planned if c["ticker"] not in still_open], {c["ticker"]: -c["qty"] for c in planned}
+        resid = residual_shorts({c["ticker"]: -c["qty"] for c in planned}, staged)
+        return [c for c in strategy.plan_cover(resid, purpose) if c["ticker"] not in still_open], resid
     short_now = {t: q for t, q in held.items() if t in symbols and q < 0}
-    return [c for c in strategy.plan_cover(short_now, purpose) if c["ticker"] not in still_open], short_now
+    staged = {t: min(v, -short_now[t]) for t, v in staged.items() if t in short_now and v > 0}
+    resid = residual_shorts(short_now, staged)
+    if staged_out is not None:
+        staged_out.update(staged)
+    return [c for c in strategy.plan_cover(resid, purpose) if c["ticker"] not in still_open], resid
+
+
+def _cover_keep_working(out: dict, run_id, symbols: list[str], purpose: str, cutoff: dt.datetime, keep,
+                        tag: str, fill_wait: int, keep_staged: bool) -> None:
+    """COVER_KEEP_WORKING: the first pass as usual (cancel stops, re-read, send). After it a
+    working cover is never cancelled - Alpaca paper took 1-3 min to fill market covers at the
+    open and re-sending only lost queue time. The loop polls the live covers (progress-aware),
+    reads open orders BEFORE positions (a fill in between can only make it under-cover), and
+    sends a new cover only for shares that no working buy and no staged MOC covers. A collar
+    limit that stalls is cancelled (confirmed) and replaced at market. Ends when flat, at the
+    cutoff, or after fill_wait x (1 + COVER_EXTRA_PASSES); "working" = shares still in live covers."""
+    staged: dict = {}
+    covers, resid = fresh_covers(symbols, purpose, out["planned"], 0, keep_staged, staged)
+    if covers is None:
+        out["problems"].append("positions unreadable after cancelling orders - covers not sent")
+        out["left"] = {c["ticker"]: -c["qty"] for c in out["planned"]}
+        alerts.raise_alert("cover_blocked", f"positions could not be re-read after cancelling orders on "
+                                            f"{', '.join(symbols)} - nothing sent", level="critical")
+        return
+    out["planned"], out["staged"], out["left"] = covers, staged, resid
+    names = sorted(set(resid) | {c["ticker"] for c in covers})
+    stop_at = min(time.time() + fill_wait * (1 + config.COVER_EXTRA_PASSES),
+                  time.time() + max(0.0, (cutoff - dt.datetime.now(broker.ET)).total_seconds()))
+    collar_covers(covers)
+    attempt, ids, polls = 0, [], 0
+    while polls < 1000:                               # a hard bound on top of stop_at
+        polls += 1
+        if covers:
+            if dt.datetime.now(broker.ET) > cutoff:
+                out["problems"].append(f"past the {cutoff:%H:%M} ET cutoff - covers not sent")
+                break
+            sent, pdt = send_orders(covers, attempt=attempt, tag=tag)
+            out["sent"] += sent
+            record_orders(run_id, sent)
+            ids += [x["id"] for x in sent if x.get("id")]
+            if pdt:
+                alerts.raise_alert("pdt_block", pdt + " - the short stays open overnight", level="critical")
+                break
+        live = [x["id"] for x in out["sent"] if x.get("id") and x.get("status") not in broker.TERMINAL]
+        if live:
+            try:
+                states = broker.wait_filled_progress(live, fill_wait if attempt == 0 else config.COVER_STALL_SECONDS,
+                                                     stop_at, config.COVER_STALL_SECONDS)
+                by_id = {x["id"]: x for x in states}
+                out["sent"] = [{**x, **by_id.get(x.get("id"), {})} for x in out["sent"]]
+            except Exception as e:
+                log.warning("cover status poll failed: %s", e)
+        try:
+            open_now = broker.open_orders(names)          # orders first, then positions
+            held = retry(broker.signed_holdings, "positions")
+        except Exception as e:
+            log.warning("could not re-read orders / positions after covering: %s", e)
+            break
+        working = {}
+        stalled_limits = []
+        for o in open_now:
+            if o["side"] != "buy" or broker.is_staged_moc(o):
+                continue
+            working[o["ticker"]] = working.get(o["ticker"], 0) + o["remaining"]
+            if o.get("type") == "limit" and str(o.get("client_order_id") or "").startswith("v2-"):
+                stalled_limits.append(o)
+        shorts = {t: q for t, q in held.items() if t in names and q < 0 and keep(t)}
+        out["left"] = residual_shorts(shorts, staged)
+        out["working"] = {t: v for t, v in working.items() if t in out["left"]}
+        need = residual_shorts(out["left"], working)
+        if not out["left"] or time.time() >= stop_at:
+            break
+        if stalled_limits and attempt == 0:           # the collar did not fill: cancel, then go market
+            lim_names = sorted({o["ticker"] for o in stalled_limits})
+            log.warning("cover collar limits not filled on %s - cancelling, then market", ", ".join(lim_names))
+            for o in stalled_limits:
+                try:
+                    broker.cancel_order(o["id"])
+                except Exception as e:
+                    log.warning("cancel %s limit %s failed: %s", o["ticker"], o["id"], e)
+            try:
+                broker.wait_no_open_orders(lim_names, config.CANCEL_WAIT_SECONDS, ignore=broker.is_staged_moc)
+            except Exception as e:
+                log.warning("could not check open orders: %s", e)
+            attempt += 1
+            covers = []
+            continue
+        if need:
+            attempt += 1
+            if attempt > config.COVER_EXTRA_PASSES:
+                break
+            log.warning("cover top-up %d: %s not covered by a working order", attempt, need, extra=MILESTONE)
+            covers = strategy.plan_cover(need, purpose)
+        else:
+            covers = []
+            if not live:
+                break
+    if out["working"]:
+        log.warning("covers still working at exit: %s (not cancelled)", out["working"], extra=MILESTONE)
+
+
+# ---------------------------------------------------------------- exchange-staged exits (STAGED_MOC_COVER)
+def moc_state_path() -> str:
+    return os.path.join(config.LOG_DIR, "staged_moc.json")
+
+
+def _moc_state(today: str) -> dict:
+    st = load_picks(moc_state_path()) or {}
+    if st.get("date") != today:
+        st = {"date": today, "mode": config.STAGED_MOC_COVER, "orders": [], "released": [], "cancelled_stops": []}
+    return st
+
+
+def stage_deadline(close: dt.datetime) -> dt.datetime:
+    """No new cls order after this (15:49 on a 16:00 close; Alpaca rejects them from 15:50)."""
+    return close - dt.timedelta(minutes=config.MOC_STAGE_BY_MINUTES_BEFORE_CLOSE)
+
+
+def handoff_due(now: dt.datetime, close: dt.datetime) -> bool:
+    """STAGED_MOC_COVER "handoff": MOC_HANDOFF_AT has passed (clamped to the stage deadline, so
+    a half day still hands off at the 12:40 run)."""
+    at = now.replace(hour=config.MOC_HANDOFF_AT[0], minute=config.MOC_HANDOFF_AT[1], second=0, microsecond=0)
+    return now >= min(at, stage_deadline(close) - dt.timedelta(minutes=10))
+
+
+def _is_stop_buy(o: dict) -> bool:
+    return o.get("side") == "buy" and o.get("type") in ("stop", "stop_limit") and not broker.is_staged_moc(o)
+
+
+def stage_mocs(run_id, today: str, close: dt.datetime, execute: bool = True, handoff: bool = False,
+               only: set[str] | None = None, tag: str = "", why: str = "") -> dict:
+    """Make the open market-on-close buys on each short reserve exactly the shares no other open
+    buy (a stop, a working cover) reserves, so the closing auction covers the rest of the short
+    without this host. Returns {"sent", "problems", "staged", "skipped"}.
+
+    handoff: first cancel the DAY buy-stops on the shorts (confirmed), then stage the whole short.
+    A name with an open sell (an entry still working) is skipped: Alpaca rejects a buy against
+    it as a potential wash trade. Never sends after stage_deadline(close). A staged MOC larger
+    than the short now (a stop or a manual cover took shares) is cancelled and re-staged at the
+    right size; if that cancel fails it is a critical moc_cover_failed (the auction would buy
+    past the short). Holds close.lock (re-entrant). Never raises."""
+    out = {"sent": [], "problems": [], "staged": {}, "skipped": {}}
+    if config.STAGED_MOC_COVER == "off":
+        return out
+    try:
+        now = dt.datetime.now(broker.ET)
+        if now > stage_deadline(close):
+            out["problems"].append(f"past the {stage_deadline(close):%H:%M} ET MOC deadline - nothing staged")
+            return out
+        held = retry(broker.signed_holdings, "positions")
+        shorts = {t: q for t, q in held.items() if q < 0 and (only is None or t in only)}
+        if not shorts:
+            return out
+        names = sorted(shorts)
+        st = _moc_state(today)
+        with job_lock("close") if execute else contextlib.nullcontext():
+            if handoff:
+                stops = [o for o in broker.open_orders(names) if _is_stop_buy(o)]
+                if stops and not execute:
+                    log.info("  DRY RUN would cancel %d stops on %s (MOC handoff)", len(stops),
+                             ", ".join(sorted({o['ticker'] for o in stops})))
+                elif stops:
+                    for o in stops:
+                        try:
+                            broker.cancel_order(o["id"])
+                        except Exception as e:
+                            log.warning("cancel stop %s %s failed: %s", o["ticker"], o["id"], e)
+                    states = broker.wait_filled([o["id"] for o in stops], config.CANCEL_WAIT_SECONDS)
+                    st["cancelled_stops"] += [{"ticker": x["ticker"], "id": x["id"], "status": x["status"]}
+                                              for x in states]
+                    log.info("MOC handoff%s: stops %s", why, {x["ticker"]: x["status"] for x in states},
+                             extra=MILESTONE)
+            orders = broker.open_orders(names)                 # orders first, then positions
+            held = retry(broker.signed_holdings, "positions")
+            for t in names:
+                q = held.get(t, 0)
+                if q >= 0:
+                    continue
+                mine = [o for o in orders if o["ticker"] == t]
+                if any(o["side"] == "sell" for o in mine):
+                    out["skipped"][t] = "a sell order is still working (entry) - staged later"
+                    continue
+                if handoff and execute and any(_is_stop_buy(o) for o in mine):
+                    out["skipped"][t] = "stop did not cancel - it stays"
+                    continue
+                other = sum(o["remaining"] for o in mine if o["side"] == "buy" and not broker.is_staged_moc(o)
+                            and not (handoff and not execute and _is_stop_buy(o)))
+                mocs = [o for o in mine if broker.is_staged_moc(o)]
+                have = sum(o["remaining"] for o in mocs)
+                want = max(0, int(round(-q - other)))
+                if have == want:
+                    if want:
+                        out["staged"][t] = want
+                    continue
+                if not execute:
+                    log.info("  DRY RUN would stage MOC BUY %s %d (have %g)%s", t, want, have, why)
+                    out["staged"][t] = want
+                    continue
+                if have > want:                               # too big: cancel, re-stage
+                    gone = True
+                    for o in mocs:
+                        try:
+                            broker.cancel_order(o["id"])
+                        except Exception as e:
+                            gone = False
+                            log.warning("cancel MOC %s %s failed: %s", t, o["id"], e)
+                    if gone and mocs:
+                        gone = all(x["status"] in broker.TERMINAL
+                                   for x in broker.wait_filled([o["id"] for o in mocs], config.CANCEL_WAIT_SECONDS))
+                    if not gone:
+                        msg = (f"{today}: staged MOC on {t} ({have:g}) is larger than the short left to it "
+                               f"({want}) and could not be cancelled - the closing auction may buy "
+                               f"{have - want:g} past the short")
+                        out["problems"].append(msg)
+                        alerts.raise_alert("moc_cover_failed", msg, ticker=t, level="critical")
+                        continue
+                    have = 0
+                n = sum(1 for x in st["orders"] if x.get("ticker") == t)
+                try:
+                    r = broker.submit_moc(t, int(want - have), "buy", client_order_id=order_id("moc", t, n, tag))
+                    row = {**r, "purpose": "moc_cover"}
+                    out["staged"][t] = want
+                    log.info("  STAGED MOC BUY %s %d (cover at the close)%s", t, want - have, why, extra=MILESTONE)
+                except Exception as e:
+                    row = {"id": None, "ticker": t, "side": "buy", "qty": want - have, "status": "rejected",
+                           "purpose": "moc_cover", "error": str(e)[:300]}
+                    out["problems"].append(f"MOC {t} rejected: {str(e)[:200]}")
+                out["sent"].append(row)
+                st["orders"].append({k: row.get(k) for k in ("ticker", "qty", "id", "status", "error")}
+                                    | {"at": utcnow().isoformat()})
+            if execute and (out["sent"] or handoff):
+                save_picks(moc_state_path(), st)
+        if out["sent"]:
+            record_orders(run_id, out["sent"])
+        if out["skipped"]:
+            log.info("MOC staging skipped: %s", out["skipped"])
+        if execute and out["problems"]:
+            bad = [p for p in out["problems"] if "larger than the short" not in p]
+            if bad:
+                alerts.raise_alert("moc_stage_failed", f"{today}{why}: " + "; ".join(bad)[:800], level="warning")
+    except LockBusy as e:
+        out["problems"].append(f"close.lock busy: {e}")
+    except Exception as e:
+        log.error("MOC staging failed: %s\n%s", e, traceback.format_exc(), extra={"step": "moc"})
+        out["problems"].append(str(e))
+        if execute:
+            alerts.raise_alert("moc_stage_failed", f"{today}{why}: MOC staging failed: {e}", level="warning")
+    return out
+
+
+def release_mocs(today: str, names: set[str], close: dt.datetime, execute: bool = True) -> set[str]:
+    """Take staged MOC covers on `names` back (before Alpaca's 15:50 cutoff) so the 15:55
+    market cover handles them. Returns the names whose every MOC is confirmed cancelled; a name
+    whose cancel does not land stays staged (the auction covers it). Never raises."""
+    released: set[str] = set()
+    try:
+        if not names:
+            return released
+        if dt.datetime.now(broker.ET) >= close - dt.timedelta(minutes=config.MOC_CUTOFF_MINUTES_BEFORE_CLOSE):
+            log.warning("MOC release: past the cls cancel cutoff - %s stay staged", sorted(names))
+            return released
+        mocs = [o for o in broker.open_orders(sorted(names)) if broker.is_staged_moc(o)]
+        if not execute:
+            log.info("  DRY RUN would release staged MOCs on %s", sorted({o["ticker"] for o in mocs}))
+            return {o["ticker"] for o in mocs}
+        for o in mocs:
+            try:
+                broker.cancel_order(o["id"])
+            except Exception as e:
+                log.warning("release MOC %s %s failed: %s", o["ticker"], o["id"], e)
+        states = broker.wait_filled([o["id"] for o in mocs], config.CANCEL_WAIT_SECONDS) if mocs else []
+        done = {x["id"] for x in states if x["status"] in ("canceled", "expired", "rejected")}
+        released = {t for t in {o["ticker"] for o in mocs}
+                    if all(o["id"] in done for o in mocs if o["ticker"] == t)}
+        log.info("MOC release: %s back to the 15:55 cover%s", sorted(released) or "none",
+                 f", still staged {sorted({o['ticker'] for o in mocs} - released)}"
+                 if {o["ticker"] for o in mocs} - released else "", extra=MILESTONE)
+        st = _moc_state(today)
+        st["released"] = sorted(set(st.get("released") or []) | released)
+        save_picks(moc_state_path(), st)
+    except Exception as e:
+        log.warning("MOC release failed: %s", e)
+    return released
+
+
+def repair_protection(run_id, today: str, close: dt.datetime, execute: bool = True, why: str = "") -> dict:
+    """A catch-up run: every short opened today gets the protection its mode wants once its
+    entry is done - a broker stop (an entry that filled after the 09:31 wait got none), then a
+    staged MOC (stage_mocs). Only names with no open order at all get a stop. Returns
+    {"stops", "moc"}. Never raises."""
+    out = {"stops": [], "moc": None}
+    try:
+        mode = config.STAGED_MOC_COVER
+        now = dt.datetime.now(broker.ET)
+        handoff = mode == "handoff" and handoff_due(now, close)
+        mine = opened_today(today, quiet=True) or set()
+        held = retry(broker.signed_holdings, "positions")
+        shorts = {t: q for t, q in held.items() if q < 0 and t in mine}
+        if not shorts:
+            return out
+        if config.BROKER_STOP_PCT and mode != "full" and not handoff:
+            bare = set(shorts) - {o["ticker"] for o in broker.open_orders(sorted(shorts))}
+            if bare:
+                pos = {p["ticker"]: p for p in broker.positions()}
+                rows = [{"ticker": t, "side": "sell", "filled_qty": -shorts[t], "status": "filled", "id": "repair",
+                         "filled_avg_price": (pos.get(t) or {}).get("avg_entry_price")} for t in sorted(bare)]
+                log.warning("protection repair%s: %s have no stop - placing", why, sorted(bare), extra=MILESTONE)
+                if execute:
+                    out["stops"] = place_stops(run_id, rows, [{"ticker": t, "price": r["filled_avg_price"]}
+                                                              for t, r in zip(sorted(bare), rows)],
+                                               fraction=config.MOC_SPLIT_STOP_FRACTION if mode == "split" else 1.0,
+                                               tag=f"-R{now:%H%M}")
+        if mode != "off" and (mode != "handoff" or handoff):
+            out["moc"] = stage_mocs(run_id, today, close, execute, handoff=handoff, only=set(shorts),
+                                    tag=f"-S{now:%H%M}", why=why)
+    except Exception as e:
+        log.error("protection repair failed: %s\n%s", e, traceback.format_exc())
+    return out
+
+
+def orphan_longs(today: str) -> dict[str, float]:
+    """Longs on names an earlier session staged an MOC for, that the sleeve does not own: the
+    auction bought past the short (a stop or a manual cover took shares after 15:50). {} when
+    none. Never raises."""
+    try:
+        st = load_picks(moc_state_path()) or {}
+        if not st.get("orders") or str(st.get("date") or "") >= today:
+            return {}
+        staged = {o["ticker"] for o in st["orders"] if o.get("id")}
+        sleeve = load_picks(long_state_path()) or {}
+        owned = {o.get("ticker") for o in sleeve.get("orders") or [] if o.get("status") != "rejected"} \
+            if long_state_has_open(sleeve) else set()
+        held = retry(broker.signed_holdings, "positions")
+        return {t: q for t, q in held.items() if q > 0 and t in staged and t not in owned}
+    except Exception as e:
+        log.warning("orphan long check failed: %s", e)
+        return {}
+
+
+def stage_moc_job(a, today: str, mode: str) -> int:
+    """`daily.py --stage-moc [--execute]` (optional cron lines, e.g. 14:00 / 15:00 / 15:30 ET):
+    STAGED_MOC_COVER "handoff" swaps the stops for MOCs once MOC_HANDOFF_AT has passed;
+    "full" / "split" top up any short whose MOC is missing or the wrong size. Never enters."""
+    if config.STAGED_MOC_COVER == "off" or "short_intraday" not in config.STRATEGIES:
+        log.info("--stage-moc: STAGED_MOC_COVER is off - nothing to do")
+        return 0
+    try:
+        session = session_or_fallback()
+        if session is None:
+            return 0
+        now = dt.datetime.now(broker.ET)
+        if not a.now and not (session[0] <= now <= stage_deadline(session[1])):
+            log.info("--stage-moc: outside %s-%s ET - nothing to do", f"{session[0]:%H:%M}",
+                     f"{stage_deadline(session[1]):%H:%M}")
+            return 0
+        if a.execute and lock_busy("open"):
+            log.info("--stage-moc: the 09:31 job is running - skipping")
+            return 0
+        out = repair_protection(None, today, session[1], a.execute, why=f" ({now:%H:%M} --stage-moc)")
+        db.events.flush_to(None)
+        moc = out.get("moc") or {}
+        return 2 if moc.get("problems") else 0
+    except LockBusy as e:
+        log.info("--stage-moc: %s - skipping", e)
+        return 0
+    except Exception as e:
+        log.error("stage-moc run failed: %s\n%s", e, traceback.format_exc())
+        alerts.raise_alert("moc_stage_failed", f"{today} --stage-moc job: {e}", level="warning")
+        return 1
 
 
 # ---------------------------------------------------------------- catch-ups: leftover shorts
-def opened_today(today: str) -> set[str] | None:
+def opened_today(today: str, quiet: bool = False) -> set[str] | None:
     """Names shorted today: the open guard's "shorts", the picks file's entries for today, and
     Alpaca's filled sells today. None when Alpaca can't be read and the 09:31 job left an
     unfinished guard (it may have shorted names this file doesn't list): don't guess."""
@@ -873,7 +1329,7 @@ def opened_today(today: str) -> set[str] | None:
     except Exception as e:
         log.warning("could not read today's sell orders: %s", e)
         if g.get("date") == today and g.get("status") == "started":
-            if today not in _unreadable_alerted:          # once per run: the 09:31 job checks twice
+            if not quiet and today not in _unreadable_alerted:          # once per run: the 09:31 job checks twice
                 _unreadable_alerted.add(today)
                 alerts.raise_alert("cover_failed", f"{today}: leftover check unreadable - today's sells could not "
                                                    f"be read ({e}) and the 09:31 run is unfinished; leftover shorts "
@@ -908,6 +1364,9 @@ def cover_leftovers(run_id, today: str, execute: bool, cutoff: dt.datetime, tag:
         return {"planned": [], "sent": [], "problems": ["leftover check unreadable"], "left": {}, "leftovers": {}}
     if not left:
         log.info("leftover check%s: no shorts from an earlier session", when, extra=MILESTONE)
+        if execute:
+            alerts.resolve_events(alerts.SHORT_STATE_KINDS, before=RUN_STARTED,
+                                  note=f"leftover check{when}: no short from an earlier session is open")
         return {"planned": [], "sent": [], "problems": [], "left": {}, "leftovers": {}}
     log.warning("leftover check%s: %d shorts from an earlier session %s - covering", when, len(left), left,
                 extra=MILESTONE)
@@ -921,9 +1380,13 @@ def cover_leftovers(run_id, today: str, execute: bool, cutoff: dt.datetime, tag:
         alerts.raise_alert("leftover_covered", f"{today}{when}: covered shorts left from an earlier session: {names}"
                                                + (f" - STILL SHORT {out['left']}" if out["left"] else ""),
                            level="warning")
-        if out["left"]:
+        unworked = residual_shorts(out["left"], out.get("working") or {})
+        if unworked:
             alerts.raise_alert("cover_failed", f"{today}{when}: leftover shorts still open after the cover: "
                                                f"{out['left']}", level="critical")
+        elif out["left"]:                         # COVER_KEEP_WORKING: live covers, not cancelled
+            alerts.raise_alert("cover_working", f"{today}{when}: leftover covers still working at Alpaca: "
+                                                f"{out['working']} - the next safety net confirms", level="warning")
     return out
 
 
@@ -961,6 +1424,8 @@ def cover_leftovers_job(a, today: str, mode: str) -> int:
                 alerts.raise_alert("cover_failed", f"{today}{when}: leftover cover failed: {e}", level="critical")
                 out = {"planned": [], "sent": [], "problems": [str(e)], "left": {}, "leftovers": {}, "error": True}
             longs = exit_late_longs(today, a.execute, session, skip_hours_check=a.now, when=when)
+            if config.STOP_REPAIR or config.STAGED_MOC_COVER != "off":
+                repair_protection(None, today, session[1], a.execute, why=when)
         db.events.flush_to(None)
         if a.execute and (out["left"] or out.get("error") or (longs and longs["left"])):
             return 1
@@ -989,6 +1454,69 @@ def next_sessions_or_weekdays(today: str, n: int) -> list[dt.date]:
         if d.weekday() < 5:
             out.append(d)
     return out
+
+
+def release_staged(a, today: str, close: dt.datetime, t_scan, scan_box: dict, lock, scan_deadline: float) -> set[str]:
+    """The 15:40 job, host alive: MOC_RELEASE takes staged MOC covers back before 15:50 so the
+    15:55 market cover handles those names. "overlap": names in today's picks while the long
+    sleeve is on (a resting cls buy-to-cover would make the 15:55 long entry skip them); waits
+    for the scan until the release time. "all": every staged name. Returns the names released."""
+    release_at = close - dt.timedelta(minutes=config.MOC_RELEASE_MINUTES_BEFORE_CLOSE)
+    try:
+        shorts = sorted(t for t, q in retry(broker.signed_holdings, "positions").items() if q < 0)
+        staged = set(staged_reservations(shorts) or {})
+        if not staged:
+            return set()
+        if config.MOC_RELEASE == "overlap":
+            if not config.OVERNIGHT_LONG_ENABLED:
+                return set()
+            while t_scan.is_alive() and (a.now or dt.datetime.now(broker.ET) < release_at) \
+                    and time.time() < scan_deadline:
+                t_scan.join(timeout=5.0)
+            with lock:
+                picks = scan_box.get("picks")
+            names = staged & {p["ticker"] for p in picks or []}
+            if picks is None:
+                log.warning("MOC release: scan not finished by %s ET - staged MOCs stay (the long sleeve skips "
+                            "names still short)", f"{release_at:%H:%M}")
+        elif config.MOC_RELEASE == "all":
+            if not a.now:
+                wait_until(release_at, "MOC release")
+            names = staged
+        else:
+            log.warning("MOC_RELEASE=%r unknown - nothing released", config.MOC_RELEASE)
+            return set()
+        if not names:
+            log.info("MOC release: nothing to take back (staged %s)", sorted(staged), extra=MILESTONE)
+            return set()
+        return release_mocs(today, names, close, a.execute)
+    except Exception as e:
+        log.warning("MOC release failed: %s - staged MOCs stay", e)
+        return set()
+
+
+COVER_RETRY_SECONDS = 10
+
+
+def cover_with_retries(run_id, execute: bool, cutoff: dt.datetime, also_cancel: list[str] | None = None) -> dict:
+    """The 15:55 cover_all, tried again until the cutoff when it raises (Alpaca 5xx / timeouts on
+    the positions read). Before, one such error failed the whole job after the guard said
+    "started", so the 15:50 fallback stood down and nothing covered. Each try re-reads
+    positions, so a retry never covers twice. LockBusy (another cover running) is not retried."""
+    tries = 0
+    while True:
+        tries += 1
+        try:
+            return cover_all(run_id, execute, cutoff, also_cancel)
+        except LockBusy:
+            raise
+        except Exception as e:
+            left = (cutoff - dt.datetime.now(broker.ET)).total_seconds()
+            if left < COVER_RETRY_SECONDS * 2 or tries >= 20:
+                raise
+            log.error("cover attempt %d failed: %s - retrying in %ds (%.0fs to the cutoff)", tries, e,
+                      COVER_RETRY_SECONDS, left, extra={"step": "cover"})
+            time.sleep(COVER_RETRY_SECONDS)
 
 
 def close_intraday(a, today: str, mode: str) -> int:
@@ -1030,6 +1558,11 @@ def close_intraday(a, today: str, mode: str) -> int:
             if a.execute:
                 alerts.raise_alert("close_fallback", f"{today}: the close job did not start - fallback covering "
                                                      f"now ({now:%H:%M} ET)", level="warning")
+
+        # exchange-staged exit: stage / top up the MOC covers first ("handoff": swap the stops
+        # now), so the close covers the shorts even if this host dies from here on
+        if config.STAGED_MOC_COVER != "off" and session is not None and not fallback:
+            repair_protection(None, today, close, a.execute, why=" (15:40 job)")
 
         # The shorts covered today were entered this morning from the picks saved at the last
         # scan. That scan's run row gets the exit. (Handover from v1: no picks file, so the
@@ -1089,6 +1622,8 @@ def close_intraday(a, today: str, mode: str) -> int:
 
         entered = [e["ticker"] for e in (prev or {}).get("entered") or []] if prev_run_id else []
         long_out = None
+        if session is not None and not fallback and config.MOC_RELEASE != "none" and staging_possible(today):
+            release_staged(a, today, close, t_scan, scan_box, lock, scan_deadline)
         long_kind = config.OVERNIGHT_LONG_ENTRY_ORDER
         if config.OVERNIGHT_LONG_ENABLED and long_kind == "moc":
             # MOC must be in by 15:50, so it can't wait for the 15:55 cover: wait for the scan until 15:49:30
@@ -1110,7 +1645,7 @@ def close_intraday(a, today: str, mode: str) -> int:
             wait_until(trade_at, "cover")
         if a.execute:
             write_guard(today, [], status="started")
-        cover = cover_all(prev_run_id or run_id, a.execute, cutoff if not a.now else close, entered)
+        cover = cover_with_retries(prev_run_id or run_id, a.execute, cutoff if not a.now else close, entered)
         if a.execute:
             write_guard(today, cover["sent"])
         for p in cover["problems"]:
@@ -1208,20 +1743,69 @@ def close_intraday(a, today: str, mode: str) -> int:
 
 
 # ---------------------------------------------------------------- v2: short_intraday, 09:31 job
-def place_stops(run_id, sent: list[dict], entries: list[dict]) -> list[dict]:
+def collar_entries(entries: list[dict]) -> None:
+    """ENTRY_ORDER "limit_collar": each short entry becomes a marketable DAY limit at
+    bid x (1 - ENTRY_COLLAR_PCT/100) (the planned price when there is no bid)."""
+    if config.ENTRY_ORDER != "limit_collar" or not entries:
+        return
+    try:
+        q = broker.quotes([e["ticker"] for e in entries])
+    except Exception as e:
+        log.warning("entry collar: quotes unavailable (%s) - planned prices", e)
+        q = {}
+    for e in entries:
+        ref = (q.get(e["ticker"]) or {}).get("bid") or e.get("price")
+        if ref:
+            e["limit_price"] = round(ref * (1 - config.ENTRY_COLLAR_PCT / 100), 2)
+
+
+def cancel_unfilled(sent: list[dict], label: str) -> list[dict]:
+    """Cancel every sent order that is still working, wait for the cancels to land, and return
+    `sent` with the final states (filled_qty is then what was really done)."""
+    live = [x["id"] for x in sent if x.get("id") and x.get("status") not in broker.TERMINAL]
+    if not live:
+        return sent
+    for i in live:
+        try:
+            broker.cancel_order(i)
+        except Exception as e:
+            log.warning("%s: cancel %s failed: %s", label, i, e)
+    try:
+        by_id = {x["id"]: x for x in broker.wait_filled(live, config.CANCEL_WAIT_SECONDS)}
+    except Exception as e:
+        log.warning("%s: status refresh failed: %s", label, e)
+        return sent
+    log.info("%s: unfilled remainder cancelled on %s", label,
+             ", ".join(sorted({x["ticker"] for x in sent if x.get("id") in live})), extra=MILESTONE)
+    return [{**x, **by_id.get(x.get("id"), {})} for x in sent]
+
+
+def place_stops(run_id, sent: list[dict], entries: list[dict], fraction: float = 1.0, tag: str = "") -> list[dict]:
     """A DAY buy-stop BROKER_STOP_PCT above each filled short's fill price (planned price if
-    the fill price is missing). Unfilled entries get none: the 15:55 cover handles them."""
-    planned = {e["ticker"]: e["price"] for e in entries}
-    stops = []
+    the fill price is missing). Unfilled entries get none: the 15:55 cover handles them. An
+    entry still working (partially filled, or not yet accepted) gets none either: Alpaca rejects
+    a buy against an open sell as a potential wash trade - stop_missing alert, and the next
+    --cover-leftovers run places it (repair_protection). fraction < 1 (STAGED_MOC_COVER "split"):
+    the stop covers ceil(filled x fraction) shares, the staged MOC the rest."""
+    planned = {e["ticker"]: e.get("price") for e in entries}
+    stops, missing = [], []
     for s in sent:
         qty = int(s.get("filled_qty") or 0)
         if s.get("side") != "sell" or qty < 1:
             if s.get("id"):
                 log.warning("no stop for %s: entry %s, filled %s", s["ticker"], s.get("status"), s.get("filled_qty"))
             continue
-        level = strategy.stop_price(s.get("filled_avg_price") or planned[s["ticker"]], config.BROKER_STOP_PCT)
+        if s.get("status") not in broker.TERMINAL:
+            missing.append(f"{s['ticker']} ({s.get('status')}, {qty} of {s.get('qty'):g} filled)")
+            continue
+        qty = max(1, math.ceil(qty * fraction - 1e-9)) if fraction < 1 else qty
+        ref = s.get("filled_avg_price") or planned.get(s["ticker"])
+        if not ref:
+            missing.append(f"{s['ticker']} (no fill price)")
+            continue
+        level = strategy.stop_price(ref, config.BROKER_STOP_PCT)
         try:
-            o = {**broker.submit_stop(s["ticker"], qty, level, client_order_id=order_id("stop", s["ticker"])),
+            o = {**broker.submit_stop(s["ticker"], qty, level, client_order_id=order_id("stop", s["ticker"], tag=tag)),
                  "purpose": "stop"}
             log.info("  STOP BUY %s %d @ $%.2f (+%g%%)", s["ticker"], qty, level, config.BROKER_STOP_PCT, extra=MILESTONE)
         except Exception as e:
@@ -1229,6 +1813,9 @@ def place_stops(run_id, sent: list[dict], entries: list[dict]) -> list[dict]:
             o = {"id": None, "ticker": s["ticker"], "side": "buy", "qty": qty, "status": "rejected",
                  "purpose": "stop", "error": str(e)[:300]}
         stops.append({**o, "stop_price": level})
+    if missing:
+        alerts.raise_alert("stop_missing", f"no broker stop yet (entry still working): {', '.join(missing)} - "
+                                           f"the next --cover-leftovers run places it", level="warning")
     record_orders(run_id, stops)
     return stops
 
@@ -1241,7 +1828,7 @@ def halt_and_flatten(today: str, reason: str, run_id, session) -> str:
     close = session[1] if session else dt.datetime.now(broker.ET) + dt.timedelta(hours=1)
     try:
         out = cover_all(run_id, True, close - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE),
-                        purpose="flatten")
+                        purpose="flatten", keep_staged=False)
     except LockBusy as e:
         alerts.raise_alert("cover_failed", f"halt flatten not run: {e} (another job is covering)", level="critical")
         return reason
@@ -1306,6 +1893,9 @@ def open_intraday(a, today: str, mode: str) -> int:
             close_cutoff = session[1] - dt.timedelta(minutes=config.CUTOFF_MINUTES_BEFORE_CLOSE)
             try:
                 pending = leftover_shorts(today)          # None: can't tell, cover_leftovers says so
+                if pending == {} and a.execute:
+                    alerts.resolve_events(alerts.SHORT_STATE_KINDS, before=RUN_STARTED,
+                                          note="09:31 leftover check: no short from an earlier session is open")
                 if pending is None or pending:
                     if a.execute and not a.now:
                         wait_until(opened + dt.timedelta(seconds=1), "leftover cover at the open")
@@ -1320,6 +1910,21 @@ def open_intraday(a, today: str, mode: str) -> int:
                 log.error("leftover cover at the open failed: %s\n%s", e, traceback.format_exc(), extra={"step": "cover"})
                 alerts.raise_alert("cover_failed", f"{today}: leftover cover at the open failed: {e} - "
                                                    f"check for shorts left from an earlier session", level="critical")
+
+        # a staged MOC that bought past its short (STAGED_MOC_COVER): sell that long first
+        orphans = orphan_longs(today) if session is not None else {}
+        if orphans:
+            alerts.raise_alert("moc_orphan_long", f"{today}: long {orphans} after an earlier staged MOC cover "
+                                                  f"bought past the short - selling at the open", level="critical")
+            if a.execute and not long_sleeve_active():      # the sleeve's exit sells every long anyway
+                if not a.now:
+                    wait_until(opened + dt.timedelta(seconds=1), "orphan long sell at the open")
+                try:
+                    exit_longs(None, True, opened + dt.timedelta(
+                        minutes=config.OVERNIGHT_LONG_EXIT_DEADLINE_MINUTES_AFTER_OPEN),
+                        purpose="moc_orphan_exit", action="sell-orphan", only=set(orphans))
+                except Exception as e:
+                    log.error("orphan long sell failed: %s", e)
 
         # overnight long sleeve: sell the longs at the open, before anything else can return early
         long_exit = open_long_exit(a, today, session, opened) if long_sleeve_active() else None
@@ -1445,10 +2050,22 @@ def open_intraday(a, today: str, mode: str) -> int:
         flips = sorted({x["ticker"] for x in long_exit["sent"]}) if long_exit else []
         mids = broker.quotes(flips) if flips else {}     # midpoints at send, for the flip fill log
         write_guard(today, [], OPEN_GUARD, status="started")
-        sent, pdt = send_orders(entries, wait=config.FILL_WAIT_SECONDS if config.BROKER_STOP_PCT else None)
+        moc_mode = config.STAGED_MOC_COVER
+        protect = bool(config.BROKER_STOP_PCT) or moc_mode in ("full", "split")
+        collar_entries(entries)
+        sent, pdt = send_orders(entries, wait=config.ENTRY_FILL_WAIT_SECONDS if protect else None)
+        if config.ENTRY_ORDER == "limit_collar":
+            sent = cancel_unfilled(sent, "entry collar")
         record_orders(run_id, sent)
         write_guard(today, sent, OPEN_GUARD)
-        stops = place_stops(run_id, sent, entries) if config.BROKER_STOP_PCT else []
+        stops = (place_stops(run_id, sent, entries,
+                             fraction=config.MOC_SPLIT_STOP_FRACTION if moc_mode == "split" else 1.0)
+                 if config.BROKER_STOP_PCT and moc_mode != "full" else [])
+        moc = None
+        if moc_mode in ("full", "split"):
+            close_at = session[1] if session else dt.datetime.now(broker.ET).replace(hour=16, minute=0, second=0)
+            moc = stage_mocs(run_id, today, close_at,
+                             only={x["ticker"] for x in sent if (x.get("filled_qty") or 0) > 0}, why=" (09:31)")
         if flips:
             log_flip_fills(long_exit["sent"], [{**x, "ref_mid": mids.get(x["ticker"], {}).get("mid")}
                                                for x in sent if x["ticker"] in flips])
@@ -1466,7 +2083,8 @@ def open_intraday(a, today: str, mode: str) -> int:
                     entered=[{"ticker": s["ticker"], "qty": s["qty"], "id": s.get("id"),
                               "status": s.get("status")} for s in sent], skipped=skips,
                     stops=[{"ticker": s["ticker"], "id": s.get("id"), "stop_price": s.get("stop_price")}
-                           for s in stops])
+                           for s in stops],
+                    **({"staged_moc": moc["staged"]} if moc else {}))
         save_picks(path, data)
         db.heartbeat("ok" if not bad else "warning", f"{today}: entered {ok} shorts, {len(skips)} skipped, "
                                                      f"{len(bad)} problems")
@@ -1679,17 +2297,20 @@ def main(argv=None) -> int:
                     help="15:50 safety net for the close job: exit 0 if it started; else cover now, then scan")
     ap.add_argument("--cover-leftovers", action="store_true",
                     help="cover every short not opened today, any time in market hours (10:00/12:00/14:00)")
+    ap.add_argument("--stage-moc", action="store_true",
+                    help="STAGED_MOC_COVER: hand the stops off to / top up the staged market-on-close covers")
     a = ap.parse_args(argv)
-    if a.open and (a.fallback or a.cover_leftovers):
-        ap.error("--open cannot be combined with --fallback or --cover-leftovers")
+    if a.open and (a.fallback or a.cover_leftovers or a.stage_moc):
+        ap.error("--open cannot be combined with --fallback, --cover-leftovers or --stage-moc")
 
     setup_logging()
     broker.load_env()
     mode = "execute" if a.execute else "dry_run"
     today = dt.datetime.now(broker.ET).date().isoformat()
     job = "open" if a.open else ("leftovers" if a.cover_leftovers else "close")
-    global ORDER_ID_SUFFIX
+    global ORDER_ID_SUFFIX, RUN_STARTED
     ORDER_ID_SUFFIX = f"-f{dt.datetime.now(broker.ET):%H%M%S}" if a.force else ""
+    RUN_STARTED = dt.datetime.now(dt.timezone.utc)
     if a.half_day_only:
         try:
             session = session_or_fallback()
@@ -1703,6 +2324,9 @@ def main(argv=None) -> int:
     if a.cover_leftovers:
         log.info("=== daily cover-leftovers run %s | %s ===", today, mode)
         return cover_leftovers_job(a, today, mode)
+    if a.stage_moc:
+        log.info("=== daily stage-moc run %s | %s | %s ===", today, mode, config.STAGED_MOC_COVER)
+        return stage_moc_job(a, today, mode)
     if a.fallback and a.execute and guard_blocks(today) and not a.force:
         log.info("--fallback: today's close job already started or finished - nothing to do")
         return 0
