@@ -19,9 +19,9 @@ This bot paper-trades the research finalist from `tuning/signals/REPORT.md`, `di
 
 > **Credit floor.** The brief asked for a 15%-of-width minimum. In the research backtest, 0.25Δ/0.10Δ spreads at 7–14 DTE collected a median of 12.3% of width, with a minimum of 6.8%. **51 of the 54 SPY/QQQ/IWM trades were below 15%.** A 15% floor would turn the strategy off, so `MIN_CREDIT_FRAC` defaults to 6.5%. Set it to `0.15` in `config.py` if you want the stricter rule anyway.
 
-## Second sleeve: SPY iron condor (off by default)
+## Second sleeve: SPY iron condor (on since 2026-10-22)
 
-The spreads finalist F1 from `tuning/spreads/REPORT.md` runs as a second, independent sleeve. It is **off** (`CONDOR_ENABLED = False` in `config.py`). While it is off, the dip sleeve's order plans are unchanged; `tests/test_condor.py` checks them against a plan generated from the code as it was before the sleeve existed.
+The spreads finalist F1 from `tuning/spreads/REPORT.md` runs as a second, independent sleeve. It was added **off** and has been **on** since commit 1e80e5f (`CONDOR_ENABLED = True` in `config.py`). While it is off, the dip sleeve's order plans are unchanged; `tests/test_condor.py` checks them against a plan generated from the code as it was before the sleeve existed.
 
 | | Rule |
 |---|---|
@@ -35,6 +35,22 @@ The spreads finalist F1 from `tuning/spreads/REPORT.md` runs as a second, indepe
 | Dashboard | Condor rows need `dashboard/supabase/migrations/006_options_sleeves.sql` (adds `sleeve` and the call-leg columns). Dip rows don't. |
 
 Try it without enabling it: `$PY live/run.py --now --preview --condor`. To enable it, set `CONDOR_ENABLED = True` in `config.py` (or add `--condor` to the daily cron line); the sweep, intraday and close-all runs manage open condors either way.
+
+## Round 3 hardening (docs/ENGINEERING_ROUND3.md)
+
+| | What | Flag (default) |
+|---|---|---|
+| Inflight journal | `state/inflight.json` names every client_order_id **before** it is submitted. A run that finds one left by a dead run looks the orders up, cancels any still open, and books the fills with the planned entry mid / signal / exit reason. | `RECOVER_INFLIGHT` (on: bookkeeping only) |
+| Resting take-profit | A GTC mleg limit close at `entry_mid × (1 − TAKE_PROFIT)` for every dip spread from the session after entry, so take-profits do not depend on the host. Canceled and confirmed before any run reads the book, re-staged after it. | `STAGE_TP_ORDERS` (off) |
+| Resting expiry exit | An expiry exit still unfilled at the close rests overnight as a GTC close at its cutoff price, so it works from 09:30 even if the 09:45 sweep never runs. | `REST_UNFILLED_EXPIRY_EXITS` (off) |
+| Dip expiry-day deadline | The condor's 15:00 ET expiry-day deadline for dip spreads too. | `DIP_EXPIRY_DAY_DEADLINE_ENABLED` (off) |
+| Ex-dividend guard | Closes the condor on the last cum-dividend session before a SPY ex-date (third Friday of Mar/Jun/Sep/Dec) inside its life when the short call is ITM and its extrinsic value is below the dividend. Daily run, plus intraday from 15:00. | `CONDOR_EXDIV_GUARD` (**on**: safety fix) |
+| Slippage | Every order journal row (and `options_live_orders`, migration 009) records planned mid / natural and the fill's slippage vs mid. | always |
+| Alerts | Supabase `alerts` rows with `bot_id 'options'` plus ntfy (`NTFY_TOPIC` from the env, `Options Bot/.env`, then `Stock Shorting Bot/.env`). Condition alerts resolve themselves when the condition clears. Only executing runs and sync raise them. | `ALERTS_ENABLED`, `ALERTS_PUSH` (on) |
+| Heartbeat | Runs write `last_run_*`, sync writes `last_sync_*`; `run_state` is the worse of the two, so the 16:15 sync no longer paints over a 15:55 error. Quiet intraday checks only touch `last_heartbeat`/`last_run_at`. | always |
+| `--dry-run` | No orders, no Supabase writes, no alerts: safe to run next to the live bot. | CLI |
+| Entry ladder | `"natural"`: walk from mid to max(natural, backtest-assumed credit). Alpaca paper fills only marketable limits, so the default halfway ladder rarely fills there (the first condor, 2026-10-23, did not). | `CONDOR_ENTRY_LADDER`, `DIP_ENTRY_LADDER` (`"halfway"`) |
+| Early condor attempt | First condor entry attempt 15:46–15:54, then again at 15:55. | `CONDOR_ENTRY_EARLY` (off) |
 
 ## Decision time
 
@@ -110,6 +126,7 @@ $PY live/run.py --execute               # what cron runs at 15:45
 $PY live/run.py --intraday --execute    # take-profit / stop checks (cron every 15 min)
 $PY live/run.py --sweep --execute       # expiry-day morning sweep (cron 09:45, mandatory)
 $PY live/run.py --check                 # health check
+$PY live/run.py --now --preview --dry-run   # what the daily run would do now; writes nothing anywhere
 $PY live/run.py --close-all             # emergency: show the closing orders
 $PY live/run.py --close-all --execute   # emergency: cancel the bot's orders, close every spread now (and unpaired legs, assigned stock)
 $PY live/sync.py                        # 16:15 ET: push the account's state to Supabase

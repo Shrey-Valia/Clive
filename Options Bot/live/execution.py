@@ -62,6 +62,7 @@ class Job:
     cutoff_price: float | None = None # exits: aggressive price used at the cutoff
     meta: dict = field(default_factory=dict)
     sleeve: str = C.SLEEVE_DIP        # "dip" | "condor": client_order_id "options-<sleeve>-..."
+    on_submit: object = None          # callable(job, client_order_id), run BEFORE each submit (inflight journal)
     # ---- runtime
     order_id: str | None = None       # the order currently working (None when settled)
     step: int = 0
@@ -166,6 +167,11 @@ def _submit(broker, job: Job, price: float, clock: Clock) -> None:
         return
     cid = client_order_id(job.sleeve, job.purpose, job.key, len(job.cids))
     job.cids.append(cid)
+    if job.on_submit is not None:               # write-ahead: the id is on disk before the order can exist
+        try:
+            job.on_submit(job, cid)
+        except Exception as e:                  # noqa: BLE001  (journaling must never block the order path)
+            log.error("%s %s: inflight journal failed: %s", job.purpose, job.key, e)
     try:
         o = broker.submit_mleg(job.legs, n, job.signed(price), cid)
     except Exception as e:                      # noqa: BLE001
@@ -444,9 +450,24 @@ def final_sweep(broker, jobs: list[Job], clock: Clock) -> None:
             j = by_cid.get(o.get("client_order_id")) or by_id.get(o.get("id"))
             if j is None:
                 continue
-            log.error("final sweep: %s %s order %s still open; canceling", j.purpose, j.key, o.get("id"))
+            oid = o.get("id")
+            if j.statuses.get(oid) in TERMINAL:
+                # Alpaca's open-orders list lags a confirmed cancel by a moment (2026-10-23: the
+                # unfilled condor entry was canceled and confirmed, then listed as open once more).
+                # Re-read it; a final order is not an error.
+                fresh, st = _get(broker, j, oid, clock)
+                if st in TERMINAL:
+                    log.info("final sweep: %s %s order %s already %s (stale open-orders list)",
+                             j.purpose, j.key, oid, st)
+                    continue
+                o = fresh or o
+            # an order of this job still working after the ladder: clean it up. WARNING, not ERROR:
+            # canceling an unfilled entry at the cutoff is a normal outcome, and the health probe
+            # counts ERROR lines as a failed run. Only a cancel that will not confirm is an error.
+            log.warning("final sweep: %s %s order %s still open (%s); canceling", j.purpose, j.key, oid,
+                        o.get("status"))
             _absorb(j, o, clock)
-            j.order_id = o.get("id")
+            j.order_id = oid
             try:
                 _cancel_and_settle(broker, j, clock)
             except Exception as e:              # noqa: BLE001
