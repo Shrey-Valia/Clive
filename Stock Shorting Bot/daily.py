@@ -1869,6 +1869,97 @@ def finish_open_guard(a, today: str) -> None:
     os.replace(tmp, OPEN_GUARD)
 
 
+def open_auction_shorts(a, today: str, session, opened: dt.datetime) -> dict | None:
+    """Round 3 (config.ROUND3_SHORT_ENTRY_ORDER == "opg"): short the saved picks in the opening
+    auction. Runs before the long sleeve's sell, so a name the sleeve holds is skipped here
+    (recheck_at_open: held) and shorted on the 09:31 path. None when the auction pass does not
+    apply (flag off, too late for OPG, no valid picks, PDT cap or halts configured); otherwise
+    {"sent", "entries", "skips"}. Never raises: any failure leaves every pick to the 09:31 path."""
+    if config.ROUND3_SHORT_ENTRY_ORDER != "opg" or session is None or a.now:
+        return None
+    opg_by = opened - dt.timedelta(minutes=config.OPG_CUTOFF_MINUTES_BEFORE_OPEN)
+    if dt.datetime.now(broker.ET) >= opg_by:
+        log.info("auction entry: past the %s ET OPG cutoff - every pick goes through 09:31", f"{opg_by:%H:%M}",
+                 extra=MILESTONE)
+        return None
+    if config.DAILY_LOSS_HALT_PCT is not None or config.DRAWDOWN_HALT_PCT is not None:
+        log.info("auction entry: an account halt is configured (checked at 09:31) - using the 09:31 path",
+                 extra=MILESTONE)
+        return None
+    try:
+        path = a.picks or (config.PICKS_FILE if a.execute or not os.path.exists(DRY_PICKS_FILE) else DRY_PICKS_FILE)
+        data = load_picks(path)
+        if not data or data.get("trade_date") != today or not data.get("picks"):
+            return None
+        picks = data["picks"]
+        acct = broker.account()
+        if not acct["shorting_enabled"] or acct["blocked"]:
+            return None
+        if strategy.pdt_applies(acct, risk.pdt_detected()) and acct["equity"] < config.PDT_MIN_EQUITY:
+            log.info("auction entry: PDT cap applies - using the 09:31 path", extra=MILESTONE)
+            return None
+        positions = broker.positions()
+        held = {p["ticker"]: int(round(p["qty"])) for p in positions}
+        existing = sum(abs(p["market_value"]) for p in positions if p["qty"] < 0) / acct["equity"] * 100
+        tickers = [p["ticker"] for p in picks]
+        borrow = broker.borrow(tickers)
+        prices = broker.last_prices(tickers, today_only=True)        # latest premarket print
+        entries, skips = strategy.recheck_at_open(picks, borrow, prices, held, acct["equity"], existing,
+                                                  sleeve_longs={t for t, q in held.items() if q > 0})
+        for s in skips:
+            log.info("  auction skip %s: %s (left to 09:31)", s["ticker"], s["reason"], extra=MILESTONE)
+        if not a.execute:
+            for e in entries:
+                log.info("  DRY RUN would SELL OPG %s %d @ ~$%.2f premarket (%.1f%%)", e["ticker"], e["qty"],
+                         e["price"], e["target_pct"], extra=MILESTONE)
+            return {"sent": [], "entries": entries, "skips": skips, "dry_block": {e["ticker"] for e in entries}}
+        write_guard(today, [], OPEN_GUARD, status="started")
+        sent = []
+        for e in entries:
+            try:
+                o = broker.submit_opg(e["ticker"], e["qty"], "sell",
+                                      client_order_id=order_id("short_opg", e["ticker"]))
+                sent.append({**o, "purpose": "short"})
+                log.info("  SELL OPG %s %d (short, opening auction)", e["ticker"], e["qty"], extra=MILESTONE)
+            except Exception as ex:                # rejected: that name goes through 09:31
+                log.error("  OPG short rejected %s: %s", e["ticker"], ex)
+                sent.append({"id": None, "ticker": e["ticker"], "side": "sell", "qty": e["qty"],
+                             "status": "rejected", "purpose": "short", "error": str(ex)[:300]})
+        record_orders(data.get("run_id"), sent)
+        write_guard(today, sent, OPEN_GUARD, status="started")
+        return {"sent": sent, "entries": entries, "skips": skips}
+    except Exception as e:
+        log.error("auction entry failed, every pick goes through 09:31: %s\n%s", e, traceback.format_exc())
+        alerts.raise_alert("auction_entry_failed", f"{today}: opening-auction shorts not sent: {e}", level="warning")
+        return None
+
+
+DEAD = ("rejected", "canceled", "expired")
+
+
+def auction_followup(auction: dict | None) -> tuple[list[dict], set[str]]:
+    """At 09:31: refresh the auction orders. Returns (orders with fill state, tickers the 09:31
+    path must not enter). A name whose OPG order died with no fill is left to the 09:31 path."""
+    if not auction:
+        return [], set()
+    if not auction.get("sent"):
+        return [], set(auction.get("dry_block") or ())
+    sent = auction["sent"]
+    ids = [s["id"] for s in sent if s.get("id")]
+    if ids:
+        try:
+            live = {s["id"]: s for s in broker.refresh(ids)}
+            sent = [{**s, **live.get(s.get("id"), {})} for s in sent]
+        except Exception as e:
+            log.warning("auction order refresh failed: %s", e)
+    block = {s["ticker"] for s in sent if not (s.get("status") in DEAD and not s.get("filled_qty"))}
+    for s in sent:
+        if s["ticker"] in block and s.get("status") != "filled":
+            log.warning("auction short %s is %s (filled %s) - not entered again at 09:31", s["ticker"],
+                        s.get("status"), s.get("filled_qty"))
+    return sent, block
+
+
 def open_intraday(a, today: str, mode: str) -> int:
     run_id = None
     try:
@@ -1910,6 +2001,10 @@ def open_intraday(a, today: str, mode: str) -> int:
                 log.error("leftover cover at the open failed: %s\n%s", e, traceback.format_exc(), extra={"step": "cover"})
                 alerts.raise_alert("cover_failed", f"{today}: leftover cover at the open failed: {e} - "
                                                    f"check for shorts left from an earlier session", level="critical")
+
+        # round 3 (off by default): opening-auction shorts, sent before the sleeve's sell so a name the
+        # sleeve still holds is skipped here and shorted on the 09:31 path
+        auction = open_auction_shorts(a, today, session, opened)
 
         # a staged MOC that bought past its short (STAGED_MOC_COVER): sell that long first
         orphans = orphan_longs(today) if session is not None else {}
@@ -1960,6 +2055,12 @@ def open_intraday(a, today: str, mode: str) -> int:
         if a.execute and not a.now and dt.datetime.now(broker.ET) > cutoff:
             raise RuntimeError(f"past the {cutoff:%H:%M} ET entry cutoff - refusing to enter late")
 
+        auction_sent, auction_block = auction_followup(auction)
+        if auction_block:
+            log.info("entered in the opening auction: %s; 09:31 handles the rest", ", ".join(sorted(auction_block)),
+                     extra=MILESTONE)
+            picks = [p for p in picks if p["ticker"] not in auction_block]
+
         db.set_step("entry")
         acct = broker.account()
         if not acct["shorting_enabled"] or acct["blocked"]:
@@ -2009,7 +2110,7 @@ def open_intraday(a, today: str, mode: str) -> int:
             held = {t: q for t, q in held.items() if t not in dry_flat}
             positions = [p for p in positions if p["ticker"] not in dry_flat]
         existing = sum(abs(p["market_value"]) for p in positions if p["qty"] < 0) / acct["equity"] * 100
-        leftover = {t: q for t, q in held.items() if q < 0}
+        leftover = {t: q for t, q in held.items() if q < 0 and t not in auction_block}
         if leftover:
             alerts.raise_alert("overnight_leftover", f"{today}: shorts still open from before the open: {leftover} "
                                                      f"({existing:.0f}% of equity, counted against the gross cap)")
@@ -2057,10 +2158,15 @@ def open_intraday(a, today: str, mode: str) -> int:
         if config.ENTRY_ORDER == "limit_collar":
             sent = cancel_unfilled(sent, "entry collar")
         record_orders(run_id, sent)
-        write_guard(today, sent, OPEN_GUARD)
-        stops = (place_stops(run_id, sent, entries,
-                             fraction=config.MOC_SPLIT_STOP_FRACTION if moc_mode == "split" else 1.0)
+        write_guard(today, [x for x in auction_sent if x["ticker"] in auction_block] + sent, OPEN_GUARD)
+        stop_frac = config.MOC_SPLIT_STOP_FRACTION if moc_mode == "split" else 1.0
+        stops = (place_stops(run_id, sent, entries, fraction=stop_frac)
                  if config.BROKER_STOP_PCT and moc_mode != "full" else [])
+        if auction_sent:
+            if config.BROKER_STOP_PCT and moc_mode != "full":
+                stops += place_stops(run_id, auction_sent, auction["entries"], fraction=stop_frac)
+            # an auction order that died unfilled was retried at 09:31: count the retry, not the dead order
+            sent = [x for x in auction_sent if x["ticker"] in auction_block] + sent
         moc = None
         if moc_mode in ("full", "split"):
             close_at = session[1] if session else dt.datetime.now(broker.ET).replace(hour=16, minute=0, second=0)

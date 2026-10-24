@@ -4,7 +4,7 @@ Written 2026-10-23, after the 2026-10-22 host outage (the 15:00–15:45 runs wer
 outage on 2026-10-23 (the 11:15–12:45 intraday runs never ran; the 13:00 run failed on DNS). Branch
 `worktree-agent-a3d77a177ee469bfe`. Code: `live/resilience.py` and `live/alerts.py` (new), plus changes in `run.py`,
 `broker.py`, `db.py`, `state.py`, `strategy.py`, `execution.py`, `sync.py`, `config.py`. Tests:
-`live/tests/test_round3.py` and `test_entry_fill.py` (37 new). Migration: `dashboard/supabase/migrations/009_options_exec_quality.sql`
+`live/tests/test_round3.py` and `test_entry_fill.py` (37 new). Migration: `dashboard/supabase/migrations/010_options_exec_quality.sql`
 (not applied).
 
 Nothing here was deployed. No order was placed, canceled or modified on any account. The only Alpaca calls were
@@ -221,7 +221,7 @@ slightly different quotes (mid 2.285, natural 2.13, ladder 2.28 → 2.20), which
 6. **Dry runs from cron still write.** Plain dry runs (no `--execute`, no `--dry-run`) still write
    `options_live_runs` and an `ok` heartbeat, as documented for the first-days dry runs. Use `--dry-run` for ad hoc
    runs.
-7. **Migration numbering.** `009_options_exec_quality.sql` is new. If another branch also adds a 009, rename one
+7. **Migration numbering.** `010_options_exec_quality.sql` is new. If another branch also adds a 009, rename one
    before applying.
 8. **PDT.** On a $15k account four day trades in five sessions trigger Alpaca's PDT protection. The bot never
    opens and closes a spread on the same day, and resting take-profits start the session after entry.
@@ -235,7 +235,7 @@ Run each from the main checkout after merging. Record order ids and screenshots 
    resting orders 0, and the next SPY ex-date 2026-12-18.
 3. `live/run.py --now --preview --dry-run` during market hours. Nothing appears in Supabase (`options_live_runs`,
    `bots.last_heartbeat` unchanged) and no ntfy.
-4. Apply `009_options_exec_quality.sql`. After the next fill, `options_live_orders` has `mid_price`, `natural_price`
+4. Apply `010_options_exec_quality.sql`. After the next fill, `options_live_orders` has `mid_price`, `natural_price`
    and `slippage`. Compare `slippage` to the Alpaca fill.
 5. Heartbeat: after a daily run with a warning, the 16:15 sync leaves `bots.run_state` at `warning` or `error`
    (not `ok`), and `last_sync_status = ok`.

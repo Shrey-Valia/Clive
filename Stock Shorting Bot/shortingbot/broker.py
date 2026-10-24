@@ -340,6 +340,12 @@ def submit_long(ticker: str, qty: float, side: str, kind: str, limit_price: floa
     return order_dict(_send(req))
 
 
+def submit_opg(ticker: str, qty: float, side: str, client_order_id: str | None = None) -> dict:
+    """Market-on-open order (round 3 opening-auction short entry). Alpaca accepts OPG orders
+    until 09:28 ET; a sell with no position is a short sale."""
+    return submit_long(ticker, qty, side, "opg", client_order_id=client_order_id)
+
+
 def wait_no_open_orders(symbols: list[str], seconds: int = 10, ignore=None) -> bool:
     """After a cancel: poll until no order on `symbols` is still open (a stop may fill instead).
     `ignore(order) -> True`: an order that was deliberately kept (a staged MOC) doesn't count."""
