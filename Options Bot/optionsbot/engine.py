@@ -64,6 +64,12 @@ DATA_START = pd.Timestamp("2024-01-01")
 # min(expiry, max(market end, DATA_END)) so the key does not depend on the Market end date.
 DATA_END = os.environ.get("OPTIONSBOT_DATA_END", "2026-10-20")
 LEGACY_MONTHLY = False     # True restores the pre-fix is_monthly rule (any Thursday 14th-20th)
+# tuning/round3 bug R3-1: with the legacy search, a strike window whose edge strikes did not print
+# stops early, so "0.10-delta" condor calls were often 0.02-0.04 delta. True = keep extending the
+# window toward the target delta (up to 12 windows) until the best printed strike is within
+# STRICT_DELTA_TOL. Off by default so published numbers do not move.
+STRICT_DELTA_SEARCH = os.environ.get("OPTIONSBOT_STRICT_DELTA") == "1"
+STRICT_DELTA_TOL = 0.02
 
 
 def _easter(y: int) -> pd.Timestamp:
@@ -415,7 +421,7 @@ class Market:
         def dist(i, iv):
             return abs(abs(self.model_delta(d, strikes[i], expiry, cp, iv)) - delta)
 
-        for _ in range(5):
+        for _ in range(12 if STRICT_DELTA_SEARCH else 5):
             need = [syms[i] for i in fetch_idx if syms[i] not in cands]
             if need:
                 b = self.bars(need, expiry)
@@ -434,6 +440,23 @@ class Market:
                 break
             _, bi = min(valid)
             lo_i, hi_i = min(fetch_idx), max(fetch_idx)
+            if STRICT_DELTA_SEARCH:
+                # tuning/round3: keep searching while the best printed strike is off target and
+                # the target lies beyond the fetched window (edge strikes that did not print
+                # must not stop the search; see tuning/round3/REPORT.md, engine bug R3-1)
+                bd = abs(self.model_delta(d, strikes[bi], expiry, cp, cands[syms[bi]][3]))
+                if abs(bd - delta) <= STRICT_DELTA_TOL or _ >= 11:
+                    break
+                # |delta| rises toward ATM: calls -> lower strikes, puts -> higher strikes
+                toward_atm = bd < delta
+                go_low = toward_atm if cp == "C" else not toward_atm
+                if go_low and lo_i > 0:
+                    fetch_idx = list(range(max(0, lo_i - window), lo_i + 1))
+                elif not go_low and hi_i < len(strikes) - 1:
+                    fetch_idx = list(range(hi_i, min(len(strikes), hi_i + window + 1)))
+                else:
+                    break
+                continue
             if bi == lo_i and lo_i > 0:
                 fetch_idx = list(range(max(0, lo_i - window), lo_i + 1))
             elif bi == hi_i and hi_i < len(strikes) - 1:
