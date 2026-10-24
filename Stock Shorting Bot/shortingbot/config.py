@@ -96,6 +96,22 @@ ENTRY_CUTOFF_MINUTES_AFTER_OPEN = 20   # a late start (Mac asleep) enters nothin
 COVER_LEFTOVERS_AT_OPEN = True
 MAX_GAP_UP_PCT = 40.0            # skip a pick that opens more than this % above its scan price
 
+# Round 3 (research/round3/REPORT.md), OFF. How the v2 short is entered:
+#   "market"  v2: DAY market sell at 09:31 (ENTRY_MINUTES_AFTER_OPEN)
+#   "opg"     market-on-open: when the --open job starts before the OPG cutoff (09:28; move its cron
+#             line to 09:20), each pick is sold short in the opening auction, sized on the latest
+#             premarket print, with the same borrow / price / MAX_GAP_UP_PCT checks against that print.
+#             A pick the overnight long sleeve still holds cannot be shorted in the same auction it is
+#             sold in, so it (and any pick the auction pass skipped or Alpaca rejected) goes through the
+#             09:31 market path as today. Not used when the PDT cap or a daily-loss / drawdown halt is
+#             configured or applies (those are checked at 09:31). Broker stops (BROKER_STOP_PCT) are
+#             placed at 09:31 on the auction fills.
+# Backtest 2016-2026 (round 3): opening-auction entry + no broker stop + close exit: IS Sharpe 1.44,
+# OOS 1.19 vs v2 live 1.14 / 0.81. With the 35% stop kept, auction entry is WORSE out of sample
+# (OOS 0.60): the open print is stopped out by first-minute spikes. Use "opg" only with
+# BROKER_STOP_PCT = None, an owner decision on tail risk (worst single short then -51% vs -37%).
+ROUND3_SHORT_ENTRY_ORDER = "market"
+
 # ---------------------------------------------------------------- overnight long sleeve (on)
 # Penny Research "LS1 flip": buy v2's own picks at T 15:55 (after the cover-all), sell them at
 # the T+1 open, then the 09:31 v2 short of the same names goes ahead. OOS 2022-2026 with v2:

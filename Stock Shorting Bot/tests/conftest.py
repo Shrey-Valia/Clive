@@ -44,6 +44,7 @@ class FakeBroker:
         self.long_mode: dict[str, object] = {}    # ticker -> "rest" (no fill yet) or ("partial", n), next submit_long only
         self.quote_map: dict[str, dict] = {}      # overrides quotes(); default ask = last = prices[t]
         self.sold_today_error: str | None = None  # sold_today() raises this
+        self.opg_mode: dict[str, str] = {}        # ticker -> "rest" / "expire" for the next submit_opg
 
     # --- the broker API daily.py / monitor.py use
     def account(self):
@@ -168,6 +169,25 @@ class FakeBroker:
         self.orders.append(o)
         if status != "filled":
             self.open_orders.append(o)
+        return dict(o)
+
+    def submit_opg(self, ticker, qty, side, client_order_id=None):
+        """Market-on-open order (round 3 auction short). Fills in full at `prices`, unless
+        `opg_mode[ticker]` is "rest" (accepted, not filled yet) or "expire" (died unfilled)."""
+        self.events.append(("opg", side, ticker, qty))
+        self.client_ids.append(client_order_id)
+        if ticker in self.reject:
+            raise RuntimeError(self.reject[ticker])
+        px = self.prices.get(ticker) or 10.0
+        mode = self.opg_mode.pop(ticker, None)
+        fill = 0 if mode in ("rest", "expire") else qty
+        if fill:
+            self._apply(ticker, fill if side == "buy" else -fill, px)
+        status = {"rest": "accepted", "expire": "expired"}.get(mode, "filled")
+        o = {"id": f"o{len(self.orders) + 1}", "ticker": ticker, "side": side, "qty": float(qty), "status": status,
+             "submitted_at": None, "filled_qty": float(fill), "filled_avg_price": px if fill else None,
+             "filled_at": None, "kind": "opg"}
+        self.orders.append(o)
         return dict(o)
 
     def _apply(self, ticker, signed, px):
@@ -308,7 +328,7 @@ def fake(monkeypatch):
     for name in ("account", "positions", "signed_holdings", "borrow", "adv20", "last_prices",
                  "session_today", "next_session", "cancel_open_orders", "submit", "refresh", "wait_filled",
                  "wait_no_open_orders", "open_order_symbols", "day_trade_count", "submit_stop",
-                 "submit_long", "quotes", "open_prints", "next_sessions", "sold_today"):
+                 "submit_long", "quotes", "open_prints", "next_sessions", "sold_today", "submit_opg"):
         monkeypatch.setattr(broker, name, getattr(fb, name))
     return fb
 

@@ -1,0 +1,14 @@
+{
+ "note": "Each candidate is the IS-best member of a family in the study scripts (or a pre-declared combination of IS family winners). OOS was not used to choose.",
+ "extra_trials": 3,
+ "candidates": {
+  "v2_nostop": {"rule": {"stop": null}},
+  "v2_auction_stop35": {"rule": {"entry": "open", "gap_ref": "pm", "stop": 0.35, "time_exit": 390}},
+  "v2_auction": {"rule": {"entry": "open", "gap_ref": "pm", "stop": null, "time_exit": 390}},
+  "v2_score_dtc71": {"book": {"score": "score_dtc", "min_score": 71.0}},
+  "v2_score_norvol69": {"book": {"score": "score_norvol", "min_score": 69.0}},
+  "v2_dtc_le5": {"book": {"filters": [["dtc", "<=", 5]]}},
+  "v2.1_auction_dtc71": {"rule": {"entry": "open", "gap_ref": "pm", "stop": null, "time_exit": 390},
+                         "book": {"score": "score_dtc", "min_score": 71.0}}
+ }
+}
