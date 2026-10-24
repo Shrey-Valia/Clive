@@ -450,9 +450,24 @@ def final_sweep(broker, jobs: list[Job], clock: Clock) -> None:
             j = by_cid.get(o.get("client_order_id")) or by_id.get(o.get("id"))
             if j is None:
                 continue
-            log.error("final sweep: %s %s order %s still open; canceling", j.purpose, j.key, o.get("id"))
+            oid = o.get("id")
+            if j.statuses.get(oid) in TERMINAL:
+                # Alpaca's open-orders list lags a confirmed cancel by a moment (2026-10-23: the
+                # unfilled condor entry was canceled and confirmed, then listed as open once more).
+                # Re-read it; a final order is not an error.
+                fresh, st = _get(broker, j, oid, clock)
+                if st in TERMINAL:
+                    log.info("final sweep: %s %s order %s already %s (stale open-orders list)",
+                             j.purpose, j.key, oid, st)
+                    continue
+                o = fresh or o
+            # an order of this job still working after the ladder: clean it up. WARNING, not ERROR:
+            # canceling an unfilled entry at the cutoff is a normal outcome, and the health probe
+            # counts ERROR lines as a failed run. Only a cancel that will not confirm is an error.
+            log.warning("final sweep: %s %s order %s still open (%s); canceling", j.purpose, j.key, oid,
+                        o.get("status"))
             _absorb(j, o, clock)
-            j.order_id = o.get("id")
+            j.order_id = oid
             try:
                 _cancel_and_settle(broker, j, clock)
             except Exception as e:              # noqa: BLE001

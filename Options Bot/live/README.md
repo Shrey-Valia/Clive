@@ -49,6 +49,8 @@ Try it without enabling it: `$PY live/run.py --now --preview --condor`. To enabl
 | Alerts | Supabase `alerts` rows with `bot_id 'options'` plus ntfy (`NTFY_TOPIC` from the env, `Options Bot/.env`, then `Stock Shorting Bot/.env`). Condition alerts resolve themselves when the condition clears. Only executing runs and sync raise them. | `ALERTS_ENABLED`, `ALERTS_PUSH` (on) |
 | Heartbeat | Runs write `last_run_*`, sync writes `last_sync_*`; `run_state` is the worse of the two, so the 16:15 sync no longer paints over a 15:55 error. Quiet intraday checks only touch `last_heartbeat`/`last_run_at`. | always |
 | `--dry-run` | No orders, no Supabase writes, no alerts: safe to run next to the live bot. | CLI |
+| Entry ladder | `"natural"`: walk from mid to max(natural, backtest-assumed credit). Alpaca paper fills only marketable limits, so the default halfway ladder rarely fills there (the first condor, 2026-10-23, did not). | `CONDOR_ENTRY_LADDER`, `DIP_ENTRY_LADDER` (`"halfway"`) |
+| Early condor attempt | First condor entry attempt 15:46–15:54, then again at 15:55. | `CONDOR_ENTRY_EARLY` (off) |
 
 ## Decision time
 

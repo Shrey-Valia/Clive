@@ -4,7 +4,7 @@ Written 2026-10-23, after the 2026-10-22 host outage (the 15:00–15:45 runs wer
 outage on 2026-10-23 (the 11:15–12:45 intraday runs never ran; the 13:00 run failed on DNS). Branch
 `worktree-agent-a3d77a177ee469bfe`. Code: `live/resilience.py` and `live/alerts.py` (new), plus changes in `run.py`,
 `broker.py`, `db.py`, `state.py`, `strategy.py`, `execution.py`, `sync.py`, `config.py`. Tests:
-`live/tests/test_round3.py` (30 new). Migration: `dashboard/supabase/migrations/009_options_exec_quality.sql`
+`live/tests/test_round3.py` and `test_entry_fill.py` (37 new). Migration: `dashboard/supabase/migrations/009_options_exec_quality.sql`
 (not applied).
 
 Nothing here was deployed. No order was placed, canceled or modified on any account. The only Alpaca calls were
@@ -173,7 +173,33 @@ credit / risk worse than a symmetric 3% condor.
 
 ## 7. Dry run of today's decision path (2026-10-23)
 
-DRYRUN_PLACEHOLDER
+Command: `live/run.py --dry-run --preview` started 15:38:59 from this worktree, using the options paper account's
+keys (OPT_* only, no Supabase, no ntfy). It waited for the 15:55 decision time, as the cron run does, with the
+strict freshness checks on. Output at 15:55:03:
+
+```
+MODE DRY RUN | equity $15,000.00 | VIX cboe delayed 15:39; VIX3M cboe delayed 15:39
+kill switch: ok -> VIX 19.82, VIX/VIX3M 0.957
+-- open spreads: 0
+SPY  close 759.92 200DMA 727.01 RSI2 15.0 IBS 0.26 -> no signal: RSI2 15.0 >= 10; IBS 0.26 >= 0.2
+     | preview: would size 2x (max loss $1,411/spread, budget $3,750)
+     SPY 2026-10-30 DTE 7: sell 748P (Δ-0.26 2.96/3.10) buy 732P (Δ-0.10 1.07/1.11) width 16 mid 1.94 nat 1.85
+IWM  close 275.87 200DMA 278.23 RSI2 48.6 IBS 0.87 -> no signal (below the 200DMA)
+     | preview: would size 7x (max loss $517/spread)
+-- condor sleeve (ENABLED): open 0
+SPY condor spot 759.92 -> OPEN 1x (max loss $2,283/spread, budget $3,000)
+     2026-12-18 DTE 56: put sell 675P (Δ-0.10 3.80/3.92) buy 650P (2.75/2.82) wing 25
+                        call sell 814C (Δ0.10 1.59/1.69) buy 835C (0.41/0.49) wing 21
+     mid credit 2.27 nat 2.08 (9% of width 25)
+     limit credits: 2.26, 2.24, 2.21, 2.19, 2.17; max loss $2,283 per condor (worst ladder credit)
+     Alpaca requirement: margin $2,500; cost basis $2,283; the bot reserves $2,500 of options BP
+     expected SPY ex-dividend date inside the condor's life: 2026-12-18 (guard ON)
+     sizing: 1x -> max loss $2,283 = 15.2% of equity (cap 20%); shared budget after $2,283 of $7,500
+DRY RUN: nothing sent. 0 dip exits / 0 dip entries; condor sleeve: 0 exits, 1 entry.
+```
+
+The live bot made the same decision at 15:55:02 from the main checkout. It submitted the same condor with
+slightly different quotes (mid 2.285, natural 2.13, ladder 2.28 → 2.20), which did not fill (section 10).
 
 ## 8. Residual risks
 
@@ -204,7 +230,7 @@ DRYRUN_PLACEHOLDER
 
 Run each from the main checkout after merging. Record order ids and screenshots in the Night/Day report.
 
-1. `python3 -m pytest -q live/tests`: 149 pass.
+1. `python3 -m pytest -q live/tests`: 156 pass.
 2. `live/run.py --check`. Expect alerts on with "ntfy push on (topic found)", inflight "no unfinished run",
    resting orders 0, and the next SPY ex-date 2026-12-18.
 3. `live/run.py --now --preview --dry-run` during market hours. Nothing appears in Supabase (`options_live_runs`,
@@ -234,5 +260,66 @@ Run each from the main checkout after merging. Record order ids and screenshots 
 11. Ex-dividend guard: on 2026-12-17 with the condor held, the daily log shows "ex-dividend check SPY: dates
     2026-12-18" and the condor row's `exdiv` note. If the 814 call is ITM, the condor closes with reason
     `exdiv_exit` (it closes that day anyway as `expiry_exit`). The intraday runs from 15:00 show the check too.
-12. Close-all: with a resting order working, `--close-all --execute` cancels it (log: resting order canceled /
+12. Entry ladder: with `CONDOR_ENTRY_LADDER = "natural"`, the next flat-sleeve daily run logs a ladder ending
+    at the natural (or at the backtest credit). The order fills on paper at that last price at the latest; the
+    journal row shows `slippage` ≈ mid − natural.
+13. Final-sweep log level: on a day whose entry does not fill, `grep ERROR live/logs/<date>.log` is empty, and the
+    health probe shows the options daily run as OK.
+14. Close-all: with a resting order working, `--close-all --execute` cancels it (log: resting order canceled /
     booked) before it works the closes.
+
+## 10. Follow-ups from the 2026-10-23 live run
+
+### 10.1 The first condor entry did not fill
+
+Live log, 2026-10-23:
+
+* At 15:55:02 the bot submitted 1x SPY 2026-12-18 IC 650/675/814/835 at a $2.28 credit (mid 2.285, natural 2.13).
+* The ladder 2.28, 2.26, 2.24, 2.22, 2.20 ran for 5 × 30 s until 15:57:33 with no fill.
+* The final sweep then canceled the order.
+
+Why: Alpaca paper "orders are filled only when they become marketable" against the NBBO. Paper does not model
+price improvement, latency slippage or queue position for resting limits
+([Paper Trading](https://docs.alpaca.markets/docs/paper-trading)). A credit mleg order is marketable only
+when its limit is at or below the combo's natural credit (sell bids − buy asks). The "halfway" ladder
+(`ENTRY_MAX_CONCESSION = 0.5`) stops halfway from mid to natural, at 2.20 here against 2.13. So on paper it fills
+only if the market moves through it in those 2.5 minutes. A real exchange often fills SPY combos inside the
+spread; paper never does. The NBBO is OPRA, while the bot sees the `indicative` feed, so the natural the bot
+computes can be off by a cent or two either way.
+
+What the backtest assumed: `optionsbot.engine` (default `Costs`, which F1's frozen numbers use) fills each leg at
+its close mark ∓ slip, with slip = min($0.25, max($0.03, 2% × price)) per leg. For this condor at the 15:55
+quotes, the slips are 0.077 + 0.056 + 0.033 + 0.030 = 0.196. The **backtest-assumed credit is ≈ $2.09**, below the
+$2.13 natural. Filling at the natural is still $0.04 better than the research assumed. Under the calibrated cost
+model (SPY half-spread × 1.25) it would be ≈ $2.22; F1 Sharpe is 1.08 at default costs and 1.16 calibrated.
+
+Fix (flags, default off, tests in `live/tests/test_entry_fill.py`):
+
+* `CONDOR_ENTRY_LADDER = "natural"` (and `DIP_ENTRY_LADDER`): walk evenly from the mid to target = max(natural,
+  backtest-assumed credit, credit floor). The target is rounded up to the tick and is never undercut. Today that
+  gives 2.28, 2.24, 2.20, 2.16, 2.13: the last price is marketable on paper, and the bot never accepts less than the
+  research assumed. If the natural is worse than the backtest credit, the ladder stops at the backtest credit and
+  may not fill. Sizing uses the worst ladder credit: max loss $2,287, still 1 condor.
+* `CONDOR_ENTRY_EARLY = True`: a first attempt from the 15:45 cron start, 90 s per price, ending 1 minute before
+  the decision time. If it does not fill, the 15:55 decision tries again. The condor has no close-dependent
+  signal, so starting 10 minutes early costs nothing in fidelity.
+* Retry the next day: already the behaviour. A flat condor sleeve plans an entry at every daily run.
+
+Recommendation: turn on `CONDOR_ENTRY_LADDER = "natural"` for the paper run. Without it, paper fills only by luck.
+`CONDOR_ENTRY_EARLY` is optional. `DIP_ENTRY_LADDER = "natural"` also helps the dip sleeve fill on paper, but it
+gives up up to half the mid-to-natural spread more than today's ladder. Decide after seeing the slippage
+columns.
+
+### 10.2 The health probe marked the daily run FAILED
+
+`health/check.py` counts any ERROR line inside a run's time span as a failure. The final sweep logged
+`ERROR final sweep: open … still open; canceling` for the unfilled condor entry. The ladder had already canceled
+it and confirmed the cancel, but Alpaca's open-orders list still showed it for a moment. Fixed in
+`execution.final_sweep`:
+
+* An order the job already saw final is re-read. If it is final, the sweep logs INFO
+  ("stale open-orders list").
+* A genuinely open leftover is canceled at WARNING.
+* Only a cancel that will not confirm is an ERROR (`_cancel_and_settle`'s "not confirmed canceled").
+
+The rest of today's run logged at INFO, so with this change the probe would have counted the run as OK.

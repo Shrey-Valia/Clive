@@ -274,7 +274,7 @@ def plan_entries(ctx: Ctx, records: dict, acct: dict, kill: tuple[bool, str], sy
             row["action"] = "signal, but earnings before expiry"
             continue
         bad = S.check_pick(pick, now=ctx.now() if ctx.strict else None)
-        ladder = S.entry_ladder(pick)
+        ladder = S.dip_entry_prices(pick)
         if avoid and {pick.short.symbol, pick.long.symbol} & avoid:
             bad = bad or "a leg is held or traded by the condor sleeve"
         if blocked:
@@ -490,7 +490,7 @@ def plan_condor_entry(ctx: Ctx, condors: dict, acct: dict, kill: tuple[bool, str
     bad = S.check_condor(pick, now=ctx.now() if ctx.strict else None)
     if avoid and pick.symbols & avoid:
         bad = bad or "a leg is held by the dip sleeve"
-    ladder = S.condor_entry_ladder(pick)
+    ladder = S.condor_entry_prices(pick)
     n, why = S.size_position(acct["equity"], pick.width, ladder[-1], used, bp,
                              risk_per_position=C.CONDOR_RISK_PER_POSITION)
     row.update(ladder=ladder, size=n, size_why=why, used_before=used)
@@ -539,6 +539,10 @@ def print_condor(acct, exit_rows, entry_row, condor_on: bool, used_total: float 
         eq = acct["equity"]
         log.info("         limit credits (re-priced in order): %s; max loss $%s per condor (worst ladder credit)",
                  ", ".join(f"{x:.2f}" for x in entry_row["ladder"]), f"{per:,.0f}")
+        bt = S.backtest_credit([p.put_short, p.call_short], [p.put_long, p.call_long])
+        log.info("         ladder mode %s; natural %.2f; backtest-assumed credit %.2f (mid -/+ max($0.03, 2%%) "
+                 "per leg); a paper fill needs a limit at or below the NBBO natural",
+                 C.CONDOR_ENTRY_LADDER, p.natural_credit, bt)
         if n == 0:
             log.info("         sizing: 0x (%s); condor cap %.0f%% of equity = $%s, shared budget used $%s of $%s",
                      entry_row.get("size_why"), 100 * C.CONDOR_RISK_PER_POSITION,
@@ -1143,6 +1147,40 @@ def _take_lock(args, timeout: float):
 
 
 # ---------------------------------------------------------------- modes
+def early_condor_entry(broker: Broker, today: dt.date, acct: dict, decide: dt.datetime) -> list[str]:
+    """CONDOR_ENTRY_EARLY: a first condor entry attempt from the start of the daily run (cron 15:45)
+    until CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE before the decision time, CONDOR_EARLY_STEP_SECONDS
+    per price. Same planner, guards, sizing and kill switch as at 15:55. If it does not fill, the
+    15:55 decision tries again. Never raises (a failure leaves the 15:55 attempt intact)."""
+    end = decide - dt.timedelta(minutes=C.CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE)
+    try:
+        condors: dict = {}
+        records, _orphans, _stocks, _ = load_book(broker, today, True, condors_out=condors)
+        if len(condors) >= C.CONDOR_MAX_POSITIONS:
+            return []
+        ctx = Ctx(broker, today, strict=True)
+        vix = signals.vix_levels(today, now=now_et())
+        kill = S.kill_switch(vix["vix"], vix["vix3m"], fresh=vix["fresh"], stale_reason=vix["stale_reason"])
+        jobs, row = plan_condor_entry(ctx, condors, acct, kill, used=open_max_loss(records),
+                                      bp=acct.get("options_buying_power"), avoid=dip_symbols(records))
+        log.info("early condor entry (until %s ET): %s; ladder %s", f"{end:%H:%M}", row.get("action"),
+                 row.get("ladder"))
+        if not jobs:
+            return []
+        resilience.start_inflight(jobs, "condor_early", today)
+        try:
+            execution.work_orders(broker, jobs, cutoff=end, hard_stop=end, step_wait=C.CONDOR_EARLY_STEP_SECONDS)
+        finally:
+            _settle(broker, jobs, records, today, None, condors=condors)
+        j = jobs[0]
+        msg = f"early condor entry {j.key}: {j.status} {j.filled_qty:g}/{j.qty} @ {_fmt(j.avg_price)}"
+        log.info(msg)
+        return [msg] if j.filled_qty <= 0 else []
+    except Exception as e:                      # noqa: BLE001
+        log.warning("early condor entry failed (the 15:55 decision still runs): %s", e)
+        return [f"early condor entry failed: {e}"]
+
+
 def run_daily(args) -> int:
     broker = Broker(execute=args.execute)
     persist = args.execute
@@ -1203,6 +1241,9 @@ def run_daily(args) -> int:
             return 1
         alerts.resolve_cleared("leftover_orders")
         warnings += recover_inflight(broker)
+        if (condor_enabled(args) and C.CONDOR_ENTRY_EARLY and not args.now
+                and now_et() < decide - dt.timedelta(minutes=C.CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE + 2)):
+            warnings += early_condor_entry(broker, today, acct, decide)
     if not args.now and now_et() < decide:
         secs = (decide - now_et()).total_seconds()
         log.info("waiting %.0fs for the decision time (%s ET)", secs, f"{decide:%H:%M}")

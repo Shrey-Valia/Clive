@@ -886,6 +886,56 @@ def slippage(credit: bool, mid: float | None, fill: float | None) -> float | Non
     return round((mid - fill) if credit else (fill - mid), 4)
 
 
+def bt_slip(price: float) -> float:
+    """The backtest's per-leg slippage (optionsbot.engine.Costs defaults)."""
+    return min(C.BT_SLIP_CAP, max(C.BT_SLIP_ABS, C.BT_SLIP_PCT * price))
+
+
+def backtest_credit(sells, buys) -> float:
+    """Credit the backtest would have booked: each leg at its mark (here the live mid) -/+ slip."""
+    return round(sum(q.mid - bt_slip(q.mid) for q in sells) - sum(q.mid + bt_slip(q.mid) for q in buys), 4)
+
+
+def natural_ladder(mid: float, natural: float, bt_credit: float, steps: int = C.ENTRY_STEPS,
+                   min_credit: float = 0.0) -> list[float]:
+    """Credits best first: from the mid to target = max(natural, backtest credit, min_credit), evenly.
+    The last price is the target rounded UP to the tick, so the ladder never asks for less than the
+    natural (which a paper fill needs and a real fill never needs to beat) nor less than the
+    research assumed. Prices strictly decrease; never above the mid."""
+    target = max(natural, bt_credit, min_credit)
+    top = round(_floor_tick(mid), 2)
+    last = round(_ceil_tick(target), 2)
+    if last >= top:
+        return [top] if top >= last else [last]
+    out = []
+    for k in range(steps + 1):
+        c = round(_floor_tick(mid - (mid - target) * k / max(steps, 1)), 2)
+        c = max(c, last)
+        if not out or c < out[-1]:
+            out.append(c)
+    if out[-1] != last:
+        out.append(last)
+    return out
+
+
+def dip_entry_prices(p: Pick) -> list[float]:
+    """DIP_ENTRY_LADDER: "halfway" (entry_ladder) or "natural" (natural_ladder with the credit floor)."""
+    if C.DIP_ENTRY_LADDER != "natural":
+        return entry_ladder(p)
+    floor = max(C.MIN_CREDIT_FRAC * p.width, C.MIN_CREDIT_ABS)
+    return natural_ladder(p.mid_credit, p.natural_credit, backtest_credit([p.short], [p.long]),
+                          min_credit=floor)
+
+
+def condor_entry_prices(p: CondorPick) -> list[float]:
+    """CONDOR_ENTRY_LADDER: "halfway" (condor_entry_ladder) or "natural"."""
+    if C.CONDOR_ENTRY_LADDER != "natural":
+        return condor_entry_ladder(p)
+    return natural_ladder(p.mid_credit, p.natural_credit,
+                          backtest_credit([p.put_short, p.call_short], [p.put_long, p.call_long]),
+                          min_credit=C.CONDOR_MIN_CREDIT_ABS + C.TICK)
+
+
 def take_profit_debit(entry_mid: float) -> float:
     """Resting take-profit price: the research rule, cost to close <= entry mid * (1 - TAKE_PROFIT),
     rounded down to the tick (never above the rule's price), at least one tick."""

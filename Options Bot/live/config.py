@@ -189,6 +189,28 @@ EXDIV_QUARTER_MONTHS = {"SPY": (3, 6, 9, 12)}
 DIVIDEND_ESTIMATE = {"SPY": 2.00}      # $/share, used when Alpaca has no recent dividend (2026: 1.80-1.90)
 EXDIV_ITM_BUFFER = 0.0                 # $ of spot above the short call strike that already counts as ITM
 
+# Entry ladders. Alpaca PAPER fills a limit order only when it is marketable against the NBBO, with no
+# price improvement and no queue for resting limits (docs: Paper Trading). An mleg credit is marketable
+# when its limit <= the combo's natural credit (sell bids - buy asks). The default "halfway" ladder stops
+# halfway between mid and natural, so on paper it fills only if the market moves through it (2026-10-23:
+# the first condor, mid 2.29 / natural 2.13, ladder 2.28 -> 2.20, did not fill).
+# "natural": walk from the mid to max(natural, backtest-assumed credit). The backtest (optionsbot.engine
+# default Costs, which the frozen finalists use) filled every leg at its close mark -/+ slip, slip =
+# min(0.25, max(0.03, 2% of the leg price)); for that condor that is ~2.09, below the natural, so filling
+# at the natural is still better than the research assumed. The ladder never goes below the
+# backtest-assumed credit: when the natural is worse than that, the last price is the backtest credit.
+CONDOR_ENTRY_LADDER = "halfway"     # "halfway" (as before) | "natural"
+DIP_ENTRY_LADDER = "halfway"        # same choice for dip entries
+BT_SLIP_ABS, BT_SLIP_PCT, BT_SLIP_CAP = 0.03, 0.02, 0.25    # optionsbot.engine.Costs defaults, per leg
+# Start the condor entry at the start of the daily run (cron 15:45) instead of the 15:55 decision time:
+# the condor has no close-dependent signal, and the research filled it at the close anyway. The first
+# attempt works from ~15:46 until CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE before the decision time; if it
+# does not fill, the 15:55 run tries again with its own ladder, and a flat sleeve retries at every daily
+# run after that.
+CONDOR_ENTRY_EARLY = False
+CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE = 1
+CONDOR_EARLY_STEP_SECONDS = 90
+
 # Execution quality: every order journal row (and options_live_orders, migration 009) records the
 # planned mid and natural and the slippage of the fill vs the mid (per share, and $ per order).
 # Monitoring parity with the shorting bot: alerts rows (bot_id 'options') + ntfy push.
