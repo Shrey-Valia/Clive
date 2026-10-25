@@ -95,7 +95,7 @@ MIN_WIDTH = 1.0                 # $; narrower spreads are rejected
 # time (the dip sleeve's expiry_exit), the 09:45 sweep closes anything left on expiry day, and no
 # condor order is ever sent on expiry day at or after CONDOR_EXPIRY_DAY_DEADLINE (Alpaca starts its
 # own expiration handling at 15:30 ET). New entries need the kill switch to be clear.
-CONDOR_ENABLED = True
+CONDOR_ENABLED = False
 CONDOR_UNDERLYING = "SPY"
 CONDOR_SHORT_DELTA = 0.10       # |delta| of the short put and the short call
 CONDOR_WING_PCT = 0.03          # long strikes at short -/+ 3% of spot
