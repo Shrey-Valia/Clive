@@ -145,11 +145,11 @@ const last = snaps[snaps.length - 1], prev = snaps[snaps.length - 2];
 
 export const DEMO_BOTS: Bot[] = [
   { id: "shorting", name: "Stock Shorting Bot", kind: "shorting", status: "active",
-    description: "Shorts the top 5 end-of-day gainer fades on Alpaca paper at 15:55 ET.",
+    description: "Scans the top 5 end-of-day gainer fades at 15:45 ET, shorts them at the next 09:31 open and covers at 15:55. Alpaca paper.",
     run_state: "ok", last_message: "2026-10-20: dry run, 5 picks", last_heartbeat: "2026-10-20T20:15:12Z" },
   { id: "lucid", name: "Lucid Bot", kind: "lucid", status: "inactive",
     description: "Pine Script alerts → CrossTrade webhook → Tradovate funded accounts.", run_state: null, last_message: null, last_heartbeat: null },
-  { id: "options", name: "Options Bot", kind: "options", status: "active", description: "Dip put credit spreads on SPY/QQQ/IWM, Alpaca paper (separate account), 15:50 ET.",
+  { id: "options", name: "Options Bot", kind: "options", status: "active", description: "Dip put credit spreads on SPY/QQQ/IWM, Alpaca paper (separate account), 15:45 ET run, decides 15:55.",
     run_state: "ok", last_message: "synced (simulated)", last_heartbeat: new Date(Date.now() - 10 * 3600_000).toISOString() },
 ];
 

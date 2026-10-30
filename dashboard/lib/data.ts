@@ -7,8 +7,9 @@ import { alpacaAccount, alpacaPositions } from "@/lib/alpaca";
 import { adminClient, supabaseServer } from "@/lib/supabase/server";
 import type { Account, Bot, BotAlert, Candidate, LogLine, LucidAccount, MarketEvent, OptOrder, OptPosition, OptRun, OptTrade, Order, Position, Run, Snap, SyncRun, Trade } from "@/lib/types";
 import type { Pick } from "@/lib/analytics";
-import { alerts as computeAlerts, entryDate, runFlow, v2Runs } from "@/lib/analytics";
+import { alerts as computeAlerts, entryDate, v2Runs } from "@/lib/analytics";
 import { addDays, etParts } from "@/lib/time";
+import { currentFlow } from "@/lib/next-action";
 import { pillOf, type HealthData, type HealthPill, type HealthRow, type HistPoint } from "@/lib/health";
 
 export type { Account, Bot, Candidate, LogLine, LucidAccount, Order, Position, Run, Snap, Trade } from "@/lib/types";
@@ -128,7 +129,7 @@ export const getShorting = cache(async (): Promise<Shorting | null> => {
   const runList = (runs ?? []) as Run[];
   const run = runList[0] ?? null;
   const ids = runList.map((r) => r.id);
-  const book = runFlow(run) === "intraday_v2" ? v2Runs(runList, etParts().date).book : null;
+  const book = currentFlow(runList) === "intraday_v2" ? v2Runs(runList, etParts().date).book : null;
   const [cands, orders, selected, bookOrders] = await Promise.all([
     run ? sb.from("short_candidates").select("*").eq("run_id", run.id).order("rank") : Promise.resolve({ data: [] }),
     run ? sb.from("short_orders").select("*").eq("run_id", run.id).order("submitted_at") : Promise.resolve({ data: [] }),
@@ -231,7 +232,7 @@ export async function getChrome() {
   if (!isDemo) {
     try { email = (await (await supabaseServer()).auth.getUser()).data.user?.email ?? null; } catch { email = null; }
   }
-  if (!s) return { alerts: [], email, positions: null, gross: null, equity: null, lastSync: null, tickers: [] as string[], flow: "overnight_v1" as const };
+  if (!s) return { alerts: [], email, positions: null, gross: null, equity: null, lastSync: null, tickers: [] as string[], flow: "intraday_v2" as const };
   const equity = s.account ? Number(s.account.equity) : null;
   const gross = s.positions.reduce((t, p) => t + Math.abs(Number(p.market_value)), 0);
   const tickers = [...new Set([...s.positions.map((p) => p.symbol), ...s.candidates.map((c) => c.ticker), ...s.trades.slice(0, 40).map((t) => t.ticker)])];
@@ -240,7 +241,7 @@ export async function getChrome() {
     email, positions: s.account ? s.positions.length : null,
     gross: equity ? (100 * gross) / equity : null, equity,
     lastSync: s.syncs[0]?.at ?? s.bot?.last_sync_at ?? s.snaps[s.snaps.length - 1]?.taken_at ?? s.bot?.last_heartbeat ?? null,
-    tickers, flow: runFlow(s.run),
+    tickers, flow: currentFlow(s.runs),
   };
 }
 

@@ -18,13 +18,23 @@ export type HealthPill = { status: HStatus; fails: number; warns: number; stale:
 
 export const COMPONENTS: { id: string; label: string; code: string }[] = [
   { id: "scheduler", label: "Scheduler", code: "SCHD" },
+  { id: "readiness", label: "Pre-close readiness", code: "READY" },
   { id: "positions", label: "Positions", code: "POS" },
   { id: "accounts", label: "Accounts", code: "ACCT" },
   { id: "data", label: "Data sources", code: "DATA" },
   { id: "state", label: "State", code: "STATE" },
   { id: "supabase", label: "Supabase / Dashboard", code: "DB" },
   { id: "host", label: "Host", code: "HOST" },
+  { id: "alerts", label: "Alerts", code: "ALRT" },
 ];
+
+/** COMPONENTS plus any component the probe reports that this list does not know yet, so a new
+ *  component's rows always render (as their own group) instead of vanishing. */
+export function componentsOf(rows: { component: string }[], skip: string[] = ["summary", "health"]) {
+  const known = new Set(COMPONENTS.map((c) => c.id));
+  const extra = [...new Set(rows.map((r) => r.component))].filter((id) => !known.has(id) && !skip.includes(id)).sort();
+  return COMPONENTS.concat(extra.map((id) => ({ id, label: id.replace(/[._]/g, " ").replace(/^\w/, (x) => x.toUpperCase()), code: id.slice(0, 5).toUpperCase() })));
+}
 
 const RANK: Record<HStatus, number> = { ok: 0, unknown: 1, warn: 2, fail: 3 };
 export const worst = (s: HStatus[]): HStatus => (s.length ? s.reduce((a, b) => (RANK[b] > RANK[a] ? b : a), "ok" as HStatus) : "unknown");
@@ -46,18 +56,27 @@ const LABELS: Record<string, string> = {
   "shorting.locks": "Lock files", "shorting.overnight_longs": "Long sleeve file", "options.account_pin": "Options account pin",
   "supabase.reachable": "Supabase API", "supabase.migrations": "Migrations 004–008", "supabase.market_events": "market_events fresh",
   "dashboard.site": "Dashboard site", disk: "Disk", clock: "Clock", python: "Python", sleep_setting: "Sleep setting",
-  wake_schedule: "Wake schedule", sleep_today: "Asleep today", schedule_entries: "Cron / timers", uptime: "Uptime", alive: "Probe heartbeat",
+  wake_schedule: "Wake schedule",
+  "readiness.summary": "Pre-close readiness (15:30)", "readiness.host_awake": "Host stays awake", "readiness.guards": "Close/decision guards",
+  "readiness.locks": "Locks before the close", "readiness.network": "Network / DNS", "readiness.keys": "API keys present",
+  "readiness.alpaca": "Alpaca reachable + market open", "readiness.schedule": "15:40/15:45 jobs scheduled",
+  "readiness.trading_host": "Trading host live", "readiness.resources": "Memory / disk",
+  power_source: "Power (AC/battery)", lid: "Lid", memory: "Memory", swap: "Swap", vm_mode: "VM mode",
+  "alerts.auto_resolve": "Event-alert auto-resolve", sleep_today: "Asleep today", schedule_entries: "Cron / timers", uptime: "Uptime", alive: "Probe heartbeat",
 };
 export const checkLabel = (name: string) => LABELS[name] ?? name.replace(/[._]/g, " ");
 
 const SHORT_DIR = "cd 'Stock Shorting Bot'";
 const OPT_DIR = "cd 'Options Bot'";
 const SLEEP_FIX = "Mac asleep? Keep it awake on a schedule: sudo pmset repeat wakeorpoweron MTWRF 09:20:00, sudo pmset -a disablesleep 1 (a closed lid no longer sleeps), keep it on power, or move the jobs to the VPS (deploy/README).";
+const READY_FIX = "Fix before 15:40 ET: the close/cover (15:40) or options decision (15:45) would not run. Keep the Mac on power with the lid open (or pmset -a disablesleep 1), check the .env keys, and that the VM is `clive-mode live` if it is the trading host.";
+const MEM_FIX = "Low memory on the VM: check `free -m` and `ps aux --sort=-rss | head`; a 1 GB droplet needs the 2 GB swapfile (deploy/bootstrap.sh).";
 
 /** What to do about a failing / warning check, in one or two sentences. */
 export function fixHint(r: HealthRow): string {
   const n = r.check_name, c = r.component, m = (r.message ?? "").toLowerCase();
   if (c === "health" && n === "alive") return "The probe is not reporting: the host is asleep or offline, or its cron line is missing (health/README.md). " + SLEEP_FIX;
+  if (c === "readiness" || n.startsWith("readiness.")) return READY_FIX;
   if (c === "scheduler") {
     const base = m.includes("missed") ? SLEEP_FIX : "Read the job's log (tail -50 logs/cron.log). NameResolutionError / ConnectionError means the host had no network at that minute.";
     if (n === "shorting.close") return `${base} Cover the shorts now (market hours): ${SHORT_DIR} && python3 daily.py --cover-leftovers --execute. Outside hours the 09:31 open job covers leftovers first.`;
@@ -89,7 +108,10 @@ export function fixHint(r: HealthRow): string {
     case "dashboard.site": return "Check the latest Netlify deploy (netlify status / the Deploys page).";
     case "disk": return "Free space: clear ~/Library/Caches, old .cache folders under the bots, or Time Machine local snapshots (tmutil listlocalsnapshots /).";
     case "clock": return "Resync the clock: sudo sntp -sS time.apple.com (macOS) or timedatectl set-ntp true (Linux).";
-    case "sleep_setting": case "wake_schedule": case "sleep_today": return SLEEP_FIX;
+    case "sleep_setting": case "wake_schedule": case "sleep_today": case "power_source": case "lid": return SLEEP_FIX;
+    case "memory": case "swap": return MEM_FIX;
+    case "vm_mode": return "sudo clive-mode live|shadow|off on the VM (deploy/README).";
+    case "alerts.auto_resolve": return "Open event alerts whose condition has cleared are resolved by the probe; if this fails, resolve them by hand (alerts.resolved_at) and check the probe's Supabase key.";
     case "schedule_entries": return "Add the missing lines with crontab -e (each bot's README lists them; the health line is in health/README.md), or enable the VPS timers.";
     case "cboe_vix": return "The options kill switch fails closed on a stale VIX: no entries until the Cboe quote is fresh. Usually clears by itself.";
     case "finra_si": return "FINRA publishes short interest twice a month with ~8 business days lag; a few weeks old is normal.";

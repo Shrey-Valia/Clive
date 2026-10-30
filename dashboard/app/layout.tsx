@@ -17,7 +17,7 @@ export const viewport: Viewport = { themeColor: "#000000", width: "device-width"
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const [tape, chrome, ev, health] = await Promise.all([
     getTape().catch(() => ({ date: null, live: false, items: [] })),
-    getChrome().catch(() => ({ alerts: [], email: null, positions: null, gross: null, equity: null, lastSync: null, tickers: [] as string[], flow: "overnight_v1" as const })),
+    getChrome().catch(() => ({ alerts: [], email: null, positions: null, gross: null, equity: null, lastSync: null, tickers: [] as string[], flow: "intraday_v2" as const })),
     getEvents().catch(() => null),
     getHealthPill().catch(() => null),
   ]);

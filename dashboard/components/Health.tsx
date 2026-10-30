@@ -6,7 +6,7 @@
 
 import { Fragment, useMemo, useState } from "react";
 import {
-  BOT_NAME, COMPONENTS, REPEATING, byPriority, checkLabel, fixHint, hostsOf, pillCls, slotsOf, statusText, worst,
+  BOT_NAME, COMPONENTS, REPEATING, componentsOf, byPriority, checkLabel, fixHint, hostsOf, pillCls, slotsOf, statusText, worst,
   type HStatus, type HealthRow, type Slot, type SlotStatus,
 } from "@/lib/health";
 import { ago, dayLabel, etHm, md } from "@/lib/format";
@@ -49,7 +49,7 @@ export function HealthBoard({ rows, heat, now, sample }: Props) {
             : warns[0] ? <>No failures. Top warning: {warns[0].message}</> : <>Every check passed{lastRun ? ` · last probe ${ago(lastRun, nowMs).toLowerCase()}` : ""}.</>}
         </div>
         <div className="hb-comps">
-          {COMPONENTS.map((c) => {
+          {componentsOf(checks).map((c) => {
             const st = worst(checks.filter((r) => r.component === c.id).map((r) => r.status));
             return <a key={c.id} href={`#hc-${c.id}`} className={`hb-comp ${st}`}><b>{c.code}</b> {statusText(st)}</a>;
           })}
@@ -86,7 +86,7 @@ export function HealthBoard({ rows, heat, now, sample }: Props) {
         </div>
       </section>
       <div className="hgrid" data-panel={2} id="p2">
-        {COMPONENTS.map((c) => {
+        {componentsOf(checks).map((c) => {
           const list = checks.filter((r) => r.component === c.id || (c.id === "host" && r.component === "health")).sort(byPriority);
           const st = worst(list.map((r) => r.status));
           const newest = list.reduce<string | null>((m, r) => (!m || r.run_at > m ? r.run_at : m), null);
@@ -286,7 +286,7 @@ function HeatStrips({ rows, heat, multi, now }: { rows: HealthRow[]; heat: Recor
   return (
     <div className="heat">
       <div className="heat-axis" aria-hidden="true"><span /><span className="heat-ticks">{ticks.map((t) => <em key={t.h}>{t.label}</em>)}</span><span /></div>
-      {COMPONENTS.concat([{ id: "health", label: "Probe", code: "HLTH" }]).map((c) => {
+      {componentsOf(rows).concat([{ id: "health", label: "Probe", code: "HLTH" }]).map((c) => {
         const list = rows.filter((r) => r.component === c.id).sort(byPriority);
         if (!list.length) return null;
         return (

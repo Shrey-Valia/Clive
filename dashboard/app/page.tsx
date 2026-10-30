@@ -6,7 +6,8 @@ import { MonthCalendar } from "@/components/EventsClient";
 import { ScoreContributionBar, Sparkline } from "@/components/Viz";
 import { Num } from "@/components/Live";
 import { getBots, getEvents, getOptionsLive, getShorting } from "@/lib/data";
-import { equitySeries, isLive, runFlow, systemLog, todayState } from "@/lib/analytics";
+import { equitySeries, isLive, systemLog, todayState } from "@/lib/analytics";
+import { currentFlow } from "@/lib/next-action";
 import { companyEventsWithin } from "@/lib/events";
 import { etParts } from "@/lib/time";
 import { CATALYST } from "@/lib/glossary";
@@ -19,11 +20,12 @@ export default async function Overview() {
   if (!bots || !s) return <NoAccess />;
   const todayEt = etParts().date;
   const events = ev?.events ?? [];
-  const v2 = runFlow(s.run) === "intraday_v2";
+  const flow = currentFlow(s.runs);
+  const v2 = flow === "intraday_v2";
   const sim = s.simulated;
   const byId = Object.fromEntries(bots.map((b) => [b.id, b]));
   const equity = s.account ? Number(s.account.equity) : null;
-  const today = todayState(s.run, s.orders, s.account, new Date(), { runs: s.runs, bookOrders: s.bookOrders });
+  const today = todayState(s.run, s.orders, s.account, new Date(), { runs: s.runs, bookOrders: s.bookOrders, flow });
   const first = s.snaps[0]?.equity ?? null;
   const openPl = s.positions.reduce((t, p) => t + Number(p.unrealized_pl), 0);
   const basis = s.positions.reduce((t, p) => t + Math.abs(Number(p.avg_entry_price) * Number(p.qty)), 0);
@@ -86,7 +88,7 @@ export default async function Overview() {
       </div>
 
       <Panel n={4} hot title={<>Short book{s.run ? ` · ${ymd(s.run.run_date)}` : ""}</>} code="BOOK"
-        meta={<>{s.run && <ModePill run={s.run} />} {v2 ? `${live ? "SHORT" : "WOULD SHORT"} AT THE NEXT 09:31 OPEN · COVER 15:55` : live ? "SHORTED AT 15:55 · SIZE BY RANK" : "DRY RUN · NOTHING WAS SENT"}</>}>
+        meta={<>{s.run && <ModePill run={s.run} />} {v2 ? `${live ? "SHORT" : "WOULD SHORT"} AT THE NEXT 09:31 OPEN · COVER 15:55 + LONG SLEEVE` : live ? "SHORTED AT 15:55 · SIZE BY RANK" : "DRY RUN · NOTHING WAS SENT"}</>}>
         {picks.length === 0 ? (
           <Empty>NO PICKS YET · NEXT SCAN 15:45 ET</Empty>
         ) : (

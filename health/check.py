@@ -169,6 +169,45 @@ OPT_API = Alpaca(OPT_ENV.get("OPT_APCA_API_KEY_ID", ""), OPT_ENV.get("OPT_APCA_A
 
 
 # ====================================================================== Supabase
+# PostgREST / Postgres codes that really mean "this table or column does not exist" (a migration
+# not applied). Anything else - 5xx, 429, timeouts, DNS, connection resets - is transient and
+# must never be reported as a missing migration (false alarm 2026-10-23 07:15 ET).
+SCHEMA_MISSING_CODES = ("42703", "42P01", "PGRST204", "PGRST205", "PGRST200")
+TRANSIENT_HTTP = {0, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530}
+
+
+class SupaError(RuntimeError):
+    def __init__(self, msg: str, status: int = 0, body: str = ""):
+        super().__init__(msg)
+        self.status, self.body = status, body or ""
+
+
+def schema_missing(e: Exception) -> bool:
+    """True only for a definite 'relation/column does not exist' answer from PostgREST."""
+    if not isinstance(e, SupaError) or e.status not in (400, 404):
+        return False
+    b = e.body
+    return any(c in b for c in SCHEMA_MISSING_CODES) or ("does not exist" in b) or ("Could not find" in b)
+
+
+def transient(e: Exception) -> bool:
+    """Network trouble or a 5xx/429: retry, and report 'unknown'/'warn' rather than a real fault."""
+    if isinstance(e, SupaError):
+        return e.status in TRANSIENT_HTTP
+    return isinstance(e, (requests.ConnectionError, requests.Timeout, TimeoutError, ConnectionError, OSError))
+
+
+def with_retry(fn, tries: int = 3, pause: float = 1.5):
+    """fn() with up to `tries` attempts on transient errors; the last error is re-raised."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if not transient(e) or i == tries - 1:
+                raise
+            time.sleep(pause * (i + 1))
+
+
 class Supa:
     def __init__(self):
         self.url = (env_get("SUPABASE_URL", SHORT_ENV) or "").rstrip("/")
@@ -179,10 +218,16 @@ class Supa:
     def get(self, table: str, params: str = "", timeout=TIMEOUT):
         if not self.ok:
             raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_KEY not set")
-        r, ms = http("GET", f"{self.url}/rest/v1/{table}?{params}", headers=self.h, timeout=timeout)
+        try:
+            r, ms = http("GET", f"{self.url}/rest/v1/{table}?{params}", headers=self.h, timeout=timeout)
+        except requests.RequestException as e:
+            raise SupaError(f"{table}: {type(e).__name__}: {scrub(e)[:160]}", 0) from e
         if r.status_code >= 300:
-            raise RuntimeError(f"{table}: HTTP {r.status_code} {scrub(r.text[:200])}")
-        return r.json()
+            raise SupaError(f"{table}: HTTP {r.status_code} {scrub(r.text[:200])}", r.status_code, r.text[:500])
+        try:
+            return r.json()
+        except ValueError as e:                   # an HTML error page from a proxy: transient
+            raise SupaError(f"{table}: non-JSON answer (HTTP {r.status_code})", 502, r.text[:200]) from e
 
     def try_get(self, table: str, params: str = "", default=None):
         try:
@@ -194,13 +239,13 @@ class Supa:
         r, _ = http("POST", f"{self.url}/rest/v1/{table}", headers={**self.h, "Prefer": "return=minimal"},
                     data=json.dumps(rows, default=str))
         if r.status_code >= 300:
-            raise RuntimeError(f"insert {table}: HTTP {r.status_code} {scrub(r.text[:200])}")
+            raise SupaError(f"insert {table}: HTTP {r.status_code} {scrub(r.text[:200])}", r.status_code, r.text[:500])
 
     def patch(self, table: str, params: str, body: dict):
         r, _ = http("PATCH", f"{self.url}/rest/v1/{table}?{params}", headers={**self.h, "Prefer": "return=minimal"},
                     data=json.dumps(body, default=str))
         if r.status_code >= 300:
-            raise RuntimeError(f"patch {table}: HTTP {r.status_code} {scrub(r.text[:200])}")
+            raise SupaError(f"patch {table}: HTTP {r.status_code} {scrub(r.text[:200])}", r.status_code, r.text[:500])
 
 
 SB = Supa()
@@ -278,6 +323,7 @@ class Probe:
         self.cal: Calendar | None = None
         self.cache: dict = {}
         self.write = False
+        self.role: dict = {"role": "unknown", "trades": True}
 
     def add(self, component, name, status, message, detail=None, expected_at=None, observed_at=None):
         self.results.append({"component": component, "check_name": name, "status": status,
@@ -617,7 +663,19 @@ def evaluate_slot(slot: dict, ev: list[dict], now: dt.datetime) -> dict:
     return res
 
 
+def parked(p: Probe) -> bool:
+    """The Mac after cutover: its bot cron lines are parked (#CLIVE-ON-VM#) and the VM trades. Its
+    local logs, guards and cron lines then say nothing about the bots; the VM's rows do."""
+    return p.role.get("role") == "mac-parked"
+
+
+PARKED_NOTE = "bots run on the VM (Mac cron lines parked by deploy/mac_cron.sh); see the VM's rows"
+
+
 def check_scheduler(p: Probe):
+    if parked(p):
+        p.add("scheduler", "timeline", "ok", PARKED_NOTE, {"role": p.role.get("role")})
+        return
     cal = p.cal
     sessions = cal.last_n(p.today, 5)
     if not sessions:
@@ -1074,6 +1132,9 @@ def _load_json(path: Path):
 
 
 def check_state(p: Probe):
+    if parked(p):
+        p.add("state", "local_state", "ok", PARKED_NOTE, {"role": p.role.get("role")})
+        return
     cal, now, logs = p.cal, p.now, SHORT / "logs"
     sess = cal.get(p.today)
     # last_execute.json (15:40 job) -----------------------------------------------
@@ -1196,32 +1257,51 @@ MIGRATIONS = [
 ]
 
 
+def migration_status(get=None) -> tuple[tuple[str, str], dict]:
+    """((status, message), detail). A migration is 'missing' only on a definite PostgREST
+    'does not exist' answer; a transient error (after retries) makes it 'unverified' -> unknown."""
+    get = get or SB.get
+    missing, unverified = {}, {}
+    for mig, probes in MIGRATIONS:
+        for table, cols in probes:
+            try:
+                with_retry(lambda: get(table, f"select={cols}&limit=0"))
+            except Exception as e:
+                if schema_missing(e):
+                    missing.setdefault(mig, []).append(f"{table}({cols})")
+                else:
+                    unverified.setdefault(mig, []).append(f"{table}: {scrub(e)[:80]}")
+    applied = [m for m, _ in MIGRATIONS if m not in missing and m not in unverified]
+    detail = {"applied": applied, "missing": missing, "unverified": unverified}
+    if missing:
+        early = [m for m in missing if m != MIGRATIONS[-1][0]]
+        msg = "not applied: " + "; ".join(f"{m} ({', '.join(v)})" for m, v in missing.items())
+        return ("fail" if early else "warn", msg), detail
+    if unverified:
+        return ("unknown", "could not verify " + ", ".join(sorted(unverified)) + " (transient Supabase error, not a missing migration): "
+                + "; ".join(v[0] for v in unverified.values())[:300]), detail
+    return ("ok", f"migrations {MIGRATIONS[0][0]}-{MIGRATIONS[-1][0]} applied"), detail
+
+
 def check_supabase(p: Probe):
     if not SB.ok:
         p.add("supabase", "supabase.reachable", "fail", "SUPABASE_URL / SUPABASE_SERVICE_KEY missing from Stock Shorting Bot/.env")
         return
+    t0 = time.monotonic()
     try:
-        t0 = time.monotonic()
-        SB.get("bots", "select=id&limit=1")
+        with_retry(lambda: SB.get("bots", "select=id&limit=1"))
         p.add("supabase", "supabase.reachable", "ok", f"REST API up ({int((time.monotonic() - t0) * 1000)} ms)",
               {"latency_ms": int((time.monotonic() - t0) * 1000)})
     except Exception as e:
-        p.add("supabase", "supabase.reachable", "fail", f"Supabase unreachable: {scrub(e)[:200]}")
+        # 3 tries over ~5 s. A flaky or down Supabase does not stop trading (the bots log and carry
+        # on), so a transient error is a warn; a 401/403 (key changed) is a real fail.
+        st = "warn" if transient(e) else "fail"
+        p.add("supabase", "supabase.reachable", st, f"Supabase {'flaky / unreachable' if st == 'warn' else 'refused the probe'}: {scrub(e)[:200]}",
+              {"transient": st == "warn", "http": getattr(e, "status", None)})
+        p.add("supabase", "supabase.migrations", "unknown", "not checked: Supabase unreachable")
         return
-    missing = {}
-    for mig, probes in MIGRATIONS:
-        for table, cols in probes:
-            try:
-                SB.get(table, f"select={cols}&limit=0")
-            except Exception as e:
-                missing.setdefault(mig, []).append(f"{table}({cols})")
-    applied = [m for m, _ in MIGRATIONS if m not in missing]
-    if not missing:
-        p.add("supabase", "supabase.migrations", "ok", f"migrations 004-008 applied", {"applied": applied})
-    else:
-        early = [m for m in missing if m != "008"]
-        msg = "not applied: " + "; ".join(f"{m} ({', '.join(v)})" for m, v in missing.items())
-        p.add("supabase", "supabase.migrations", "fail" if early else "warn", msg, {"applied": applied, "missing": missing})
+    st_, notes = migration_status()
+    p.add("supabase", "supabase.migrations", *st_, notes)
     try:
         r = SB.get("market_events", "select=updated_at&order=updated_at.desc&limit=1")
         t = parse_ts(r[0]["updated_at"]) if r else None
@@ -1231,7 +1311,7 @@ def check_supabase(p: Probe):
               f"market_events last updated {et_str(t)} ({age:.1f} h ago)" if t else "market_events is empty",
               {"updated_at": iso(t), "age_h": round(age, 2) if age is not None else None}, observed_at=t)
     except Exception as e:
-        p.add("supabase", "supabase.market_events", "fail", f"market_events unreadable: {scrub(e)[:160]}")
+        p.add("supabase", "supabase.market_events", "unknown" if transient(e) else "fail", f"market_events unreadable: {scrub(e)[:160]}")
     try:
         r, ms = http("GET", DASHBOARD_URL, allow_redirects=True)
         if r.status_code < 400:
@@ -1239,9 +1319,10 @@ def check_supabase(p: Probe):
         elif r.status_code in (401, 403):
             p.add("supabase", "dashboard.site", "ok", f"{DASHBOARD_URL} up, protected (HTTP {r.status_code}, Netlify team login)", {"latency_ms": ms, "http": r.status_code, "url": DASHBOARD_URL})
         else:
-            p.add("supabase", "dashboard.site", "fail", f"{DASHBOARD_URL} HTTP {r.status_code}", {"latency_ms": ms, "http": r.status_code, "url": DASHBOARD_URL})
+            p.add("supabase", "dashboard.site", "warn" if r.status_code in TRANSIENT_HTTP else "fail", f"{DASHBOARD_URL} HTTP {r.status_code}",
+                  {"latency_ms": ms, "http": r.status_code, "url": DASHBOARD_URL})
     except Exception as e:
-        p.add("supabase", "dashboard.site", "fail", f"{DASHBOARD_URL} unreachable: {scrub(e)[:160]}")
+        p.add("supabase", "dashboard.site", "warn" if transient(e) else "fail", f"{DASHBOARD_URL} unreachable: {scrub(e)[:160]}")
 
 
 # ====================================================================== 7. host
@@ -1265,6 +1346,9 @@ EXPECTED_TIMERS = ["clive-short-open", "clive-short-monitor", "clive-short-close
                    "clive-opt-sync", "clive-events-sync", "clive-health-check"]
 
 
+MAC_AWAKE_CHECKS = ("sleep_setting", "wake_schedule", "sleep_today", "power_source", "lid")
+
+
 def check_host(p: Probe):
     du = shutil.disk_usage(ROOT)
     free_gb, pct = du.free / 1e9, 100 * du.free / du.total
@@ -1286,9 +1370,18 @@ def check_host(p: Probe):
           {"version": platform.python_version(), "executable": sys.executable, "bot_python_present": os.path.exists(bot_py)})
     if platform.system() == "Darwin":
         host_macos(p)
+        if parked(p):          # the Mac no longer has to stay awake: report, never alert
+            for r in p.results:
+                if r["component"] == "host" and r["check_name"] in MAC_AWAKE_CHECKS and r["status"] in ("warn", "fail"):
+                    r["status"] = "ok"
+                    r["message"] = (r["message"] + " (not the trading host)")[:900]
+    elif platform.system() == "Linux":
+        host_linux(p)
     # cron / timers --------------------------------------------------------------------
     ct, st = crontab_text(), systemd_timers()
-    if st is not None and st.strip():
+    if parked(p):
+        p.add("host", "schedule_entries", "ok", PARKED_NOTE, {"kind": "crontab", "parked": True})
+    elif st is not None and st.strip():
         have = [t for t in EXPECTED_TIMERS if f"{t}.timer" in st]
         miss = [t for t in EXPECTED_TIMERS if t not in have]
         p.add("host", "schedule_entries", "warn" if miss else "ok",
@@ -1333,6 +1426,12 @@ def host_macos(p: Probe):
         p.add("host", "sleep_setting", "warn",
               f"system sleep after {sleep_min} min {prevented}; a closed lid on battery still sleeps (Clamshell Sleep)",
               {"sleep_min": sleep_min, "prevented_by": prevented})
+    try:
+        info = mac_power(p)
+        for name, st, msg in judge_power(info, market_window(p)):
+            p.add("host", name, st, msg, {k: info.get(k) for k in ("source", "percent", "state", "lid_closed", "sleep_min", "sleep_disabled")})
+    except Exception as e:
+        p.add("host", "power_source", "unknown", f"pmset / ioreg unavailable: {scrub(e)[:100]}")
     p.add("host", "wake_schedule", "ok" if repeat else "warn",
           ("repeating wake: " + "; ".join(rep_lines)) if repeat else "no repeating wake scheduled (pmset repeat)", {"repeat": rep_lines})
     # sleep stretches today from the power log (Sleep ... next full Wake; dark wakes stay asleep)
@@ -1382,6 +1481,431 @@ def host_macos(p: Probe):
               {"last_wake": iso(last_wake)})
 
 
+# ====================================================================== 7b. power, memory, VM mode
+def parse_pmset_batt(text: str) -> dict:
+    """`pmset -g batt` -> {source: 'ac'|'battery'|'ups'|None, percent, state, has_battery}."""
+    m = re.search(r"Now drawing from '([^']+)'", text or "")
+    src = None
+    if m:
+        s = m.group(1).lower()
+        src = "battery" if "battery" in s else "ups" if "ups" in s else "ac"
+    pm = re.search(r"(\d{1,3})%;\s*([^;]+);", text or "")
+    return {"source": src, "percent": int(pm.group(1)) if pm else None,
+            "state": pm.group(2).strip() if pm else None, "has_battery": bool(pm)}
+
+
+def parse_clamshell(text: str) -> bool | None:
+    """`ioreg -r -k AppleClamshellState -d 1` -> True when the lid is closed, None if unknown."""
+    m = re.search(r'"AppleClamshellState"\s*=\s*(Yes|No)', text or "")
+    return None if not m else m.group(1) == "Yes"
+
+
+def parse_pmset_g(text: str) -> dict:
+    """`pmset -g` (settings for the CURRENT power source) -> sleep minutes, what prevents it, SleepDisabled."""
+    m = re.search(r"^\s*sleep\s+(\d+)(.*)$", text or "", re.M)
+    return {"sleep_min": int(m.group(1)) if m else None, "prevented_by": m.group(2).strip() if m else "",
+            "sleep_disabled": bool(re.search(r"^\s*SleepDisabled\s+1", text or "", re.M))}
+
+
+def mac_power(p: Probe) -> dict:
+    if "power" not in p.cache:
+        run = lambda *a: subprocess.run(list(a), capture_output=True, text=True, timeout=15).stdout
+        info = {**parse_pmset_g(run("/usr/bin/pmset", "-g")), **parse_pmset_batt(run("/usr/bin/pmset", "-g", "batt"))}
+        try:
+            info["lid_closed"] = parse_clamshell(run("/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "1"))
+        except Exception:
+            info["lid_closed"] = None
+        p.cache["power"] = info
+    return p.cache["power"]
+
+
+def market_window(p: Probe) -> bool:
+    """09:20 to 16:25 ET on a session (the bots' jobs from the open entry to the 16:15 sync)."""
+    s = p.cal.get(p.today) if p.cal else None
+    return bool(s and s.open - dt.timedelta(minutes=10) <= p.now <= dt.datetime.combine(p.today, dt.time(16, 25), ET))
+
+
+def judge_power(info: dict, in_window: bool) -> list[tuple[str, str, str]]:
+    """[(check_name, status, message)] for the Mac's power source and lid. Pure, for tests.
+    A closed lid or battery power only matter in the market window (09:20-16:25 ET)."""
+    out = []
+    src, pct, lid = info.get("source"), info.get("percent"), info.get("lid_closed")
+    no_sleep = info.get("sleep_disabled") or info.get("sleep_min") == 0
+    prevented = info.get("prevented_by") or ""
+    held = "caffeinate" in prevented or "sleep prevented" in prevented
+    when = "in market hours" if in_window else "(outside market hours)"
+    if not info.get("has_battery") and src in (None, "ac"):
+        out.append(("power_source", "ok", "on AC power (no battery)"))
+    elif src == "battery":
+        p_s = f" at {pct}%" if pct is not None else ""
+        if not in_window:
+            out.append(("power_source", "ok", f"on battery{p_s} {when}"))
+        elif pct is not None and pct < 20:
+            out.append(("power_source", "fail", f"on battery{p_s} {when}: it will die or sleep before the close; plug it in"))
+        elif not no_sleep and not held:
+            out.append(("power_source", "fail", f"on battery{p_s} {when} with system sleep after {info.get('sleep_min')} min and no "
+                                                "sleep assertion: the Mac can sleep through the 15:40 cover; plug it in"))
+        elif not no_sleep:
+            out.append(("power_source", "warn", f"on battery{p_s} {when}: idle sleep is held off ({prevented[:60]}), but a closed lid "
+                                                "or a flat battery still stops every job; plug it in"))
+        else:
+            out.append(("power_source", "warn", f"on battery{p_s} {when} (sleep disabled, but plug it in)"))
+    else:
+        out.append(("power_source", "ok", f"on {'UPS' if src == 'ups' else 'AC'} power" + (f", battery {pct}%" if pct is not None else "")))
+    if lid is None:
+        out.append(("lid", "ok", "no lid / state unknown"))
+    elif not lid:
+        out.append(("lid", "ok", "lid open"))
+    elif not in_window:
+        out.append(("lid", "ok", f"lid closed {when}"))
+    elif src == "battery" and not info.get("sleep_disabled"):
+        out.append(("lid", "fail", f"lid closed on battery {when}: Clamshell Sleep will stop every job; open it, or plug in with disablesleep"))
+    elif info.get("sleep_disabled"):
+        out.append(("lid", "ok", f"lid closed {when}, sleep disabled (pmset disablesleep 1)"))
+    else:
+        out.append(("lid", "warn", f"lid closed on AC {when}: it stays awake only with an external display or `sudo pmset -a disablesleep 1`"
+                                   + ("" if held else "; no caffeinate assertion seen")))
+    return out
+
+
+def parse_meminfo(text: str) -> dict:
+    kb = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(\w+):\s+(\d+) kB", text or "", re.M)}
+    mb = lambda k: round(kb.get(k, 0) / 1024)
+    return {"total_mb": mb("MemTotal"), "avail_mb": mb("MemAvailable"), "swap_total_mb": mb("SwapTotal"),
+            "swap_free_mb": mb("SwapFree")}
+
+
+def judge_memory(m: dict) -> list[tuple[str, str, str]]:
+    """[(check_name, status, message)] for a Linux host. Thresholds suit a 1 GB droplet running
+    up to four Python jobs at 15:40-15:55 ET (each ~100-250 MB with pandas)."""
+    out = []
+    avail, total = m["avail_mb"], m["total_mb"]
+    st = "fail" if avail < 100 else "warn" if avail < 200 else "ok"
+    out.append(("memory", st, f"{avail} MB of {total} MB available"))
+    used = m["swap_total_mb"] - m["swap_free_mb"]
+    if m["swap_total_mb"] == 0:
+        out.append(("swap", "warn" if total < 2000 else "ok",
+                    "no swap" + (" on a host under 2 GB: run deploy/bootstrap.sh (adds a 2 GB swapfile)" if total < 2000 else "")))
+    else:
+        pct = 100 * used / m["swap_total_mb"]
+        out.append(("swap", "fail" if pct > 90 else "warn" if pct > 60 else "ok", f"swap {used} of {m['swap_total_mb']} MB used ({pct:.0f}%)"))
+    return out
+
+
+MODE_FILE = Path(os.environ.get("CLIVE_MODE_FILE", "/etc/clive/mode"))
+MIGRATED_FILE = Path("/var/lib/clive/state-migrated")
+
+
+def vm_mode() -> str | None:
+    """The deploy kit's run mode (off / shadow / live), or None on a host without the kit (the Mac)."""
+    try:
+        return MODE_FILE.read_text().strip() or "off"
+    except OSError:
+        return None
+
+
+def host_linux(p: Probe):
+    try:
+        m = parse_meminfo(Path("/proc/meminfo").read_text())
+        for name, st, msg in judge_memory(m):
+            p.add("host", name, st, msg, m)
+    except OSError as e:
+        p.add("host", "memory", "unknown", f"/proc/meminfo unreadable: {e}")
+    mode = vm_mode()
+    if mode is not None:
+        migrated = MIGRATED_FILE.exists()
+        st = "warn" if mode == "live" and not migrated else "ok"
+        p.add("host", "vm_mode", st, f"VM mode {mode}" + ("; live without the state-migrated marker" if st == "warn" else "")
+              + {"live": " (this VM trades)", "shadow": " (dry runs; the Mac trades)", "off": " (every job is a no-op)"}.get(mode, ""),
+              {"mode": mode, "state_migrated": migrated})
+    if shutil.which("systemctl"):
+        try:
+            r = subprocess.run(["systemctl", "list-units", "clive-*", "--state=failed", "--no-legend", "--plain"],
+                               capture_output=True, text=True, timeout=10).stdout
+            failed = [l.split()[0] for l in r.splitlines() if l.strip()]
+            p.add("host", "failed_units", "warn" if failed else "ok",
+                  f"failed units: {', '.join(failed)}" if failed else "no failed clive-* units", {"failed": failed})
+        except Exception as e:
+            p.add("host", "failed_units", "unknown", f"systemctl unavailable: {scrub(e)[:100]}")
+
+
+# ====================================================================== 8. pre-close readiness
+# The 15:30 ET run (12:30 on half days) asks: would anything stop the 15:40 close/cover and the
+# 15:45 options decision? A fail pushes an urgent ntfy, leaving 10 minutes to react.
+def readiness_due(p: Probe) -> bool:
+    s = p.cal.get(p.today) if p.cal else None
+    return bool(s and s.at(s.close_min - 35) <= p.now < s.at(s.close_min - 19))
+
+
+def trading_role() -> dict:
+    """Is THIS host the one that trades? vm-live and mac-cron trade; vm-shadow, vm-off and a Mac
+    whose bot lines are parked (#CLIVE-ON-VM#, deploy/mac_cron.sh disable) do not."""
+    mode = vm_mode()
+    if mode is not None:
+        return {"role": f"vm-{mode}", "trades": mode == "live"}
+    ct = crontab_text()
+    if ct is None:
+        return {"role": "none", "trades": False}
+    active = [l for l in ct.splitlines() if l.strip() and not l.lstrip().startswith("#") and re.search(r"daily\.py[^\n]*--execute", l)]
+    if active:
+        return {"role": "mac-cron", "trades": True}
+    if "#CLIVE-ON-VM#" in ct:
+        return {"role": "mac-parked", "trades": False}
+    return {"role": "none", "trades": False}
+
+
+def _lock_info(path: Path) -> dict | None:
+    """A pid lock file (close.lock) -> {pid, alive, age_min}; None when absent."""
+    try:
+        raw = path.read_text().strip()
+        age = (time.time() - path.stat().st_mtime) / 60
+    except OSError:
+        return None
+    pid = int(raw) if raw.isdigit() else None
+    alive = False
+    if pid:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:
+            alive = True
+    return {"pid": pid, "alive": alive, "age_min": round(age, 1)}
+
+
+def _flock_held(path: Path) -> bool | None:
+    """The options bot's live/state/.lock is an flock: try a shared non-blocking lock (harmless)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    try:
+        with open(path, "a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                return False
+            except BlockingIOError:
+                return True
+    except OSError:
+        return None
+
+
+def check_readiness(p: Probe):
+    sess = p.cal.get(p.today)
+    close_at = sess.at(sess.close_min - 20) if sess else None
+    hhmm = f"{close_at:%H:%M}" if close_at else "15:40"
+    role = trading_role()
+    rows: list[tuple] = []
+
+    def add(n, st, msg, d=None):
+        rows.append((n, st, msg, d))
+
+    if not role["trades"]:
+        # Not the trading host: make sure SOME other host is alive instead.
+        others = SB.try_get("health_latest", "select=host,run_at,status&component=eq.health&check_name=eq.alive"
+                                             f"&host=neq.{requests.utils.quote(p.host)}") if SB.ok else None
+        fresh = [r for r in (others or []) if parse_ts(r.get("run_at")) and (p.now - parse_ts(r["run_at"])).total_seconds() < 35 * 60]
+        if others is None:
+            add("readiness.trading_host", "unknown", f"this host is {role['role']} (does not trade); the other hosts' heartbeats are unreadable",
+                {"role": role["role"]})
+        elif fresh:
+            add("readiness.trading_host", "ok", f"this host is {role['role']} (does not trade); "
+                f"{', '.join(sorted({r['host'] for r in fresh}))} reported in the last 35 min", {"role": role["role"], "others": [r["host"] for r in fresh]})
+        else:
+            add("readiness.trading_host", "fail", f"this host is {role['role']} (does not trade) and no other host has reported for 35 min: "
+                f"nothing may run the {hhmm} cover. Re-enable the Mac cron (deploy/mac_cron.sh enable) or set the VM live.", {"role": role["role"]})
+    else:
+        # 1. the host stays awake -------------------------------------------------------
+        if platform.system() == "Darwin":
+            info = mac_power(p)
+            bad = [(n, st, m) for n, st, m in judge_power(info, True) if st != "ok"]
+            if not info.get("sleep_disabled") and info.get("sleep_min") not in (0, None) and "caffeinate" not in (info.get("prevented_by") or ""):
+                bad.append(("sleep", "warn", f"system sleep after {info.get('sleep_min')} min and no caffeinate assertion"))
+            add("readiness.host_awake", worst(b[1] for b in bad) if bad else "ok", "; ".join(b[2] for b in bad) if bad else
+                f"on {info.get('source') or 'AC'} power, lid {'closed' if info.get('lid_closed') else 'open'}, sleep held off", info)
+        else:
+            mode = vm_mode()
+            add("readiness.host_awake", "ok" if mode == "live" else "fail",
+                f"VM mode {mode}" + (", always on" if mode == "live" else ": jobs will not trade"), {"mode": mode})
+        # 2. guards: one already dated today makes the job refuse -------------------------
+        today = p.today.isoformat()
+        g = _load_json(SHORT / "logs" / "last_execute.json") or {}
+        og = _load_json(OPT / "live" / "state" / "last_execute.json") or {}
+        probs = []
+        if g.get("date") == today:
+            probs.append(f"logs/last_execute.json is already dated {today}: the {hhmm} close job will refuse ('already executed today')")
+        if og.get("daily") == today:
+            probs.append(f"Options live/state/last_execute.json daily={today}: the options decision will be skipped")
+        add("readiness.guards", "fail" if probs else "ok", "; ".join(probs) or "close and options guards not set yet today",
+            {"short": g.get("date"), "options": og.get("daily")})
+        # 3. locks ------------------------------------------------------------------------
+        cl = _lock_info(SHORT / "logs" / "close.lock")
+        olock = OPT / "live" / "state" / ".lock"
+        held = _flock_held(olock) if olock.exists() else False
+        try:
+            omt = (time.time() - olock.stat().st_mtime) / 60
+        except OSError:
+            omt = None
+        st, msgs = "ok", []
+        if cl and cl["alive"]:
+            st = "fail" if cl["age_min"] > 20 else "warn"
+            msgs.append(f"close.lock held by pid {cl['pid']} for {cl['age_min']:.0f} min" + (" (stuck? the close job will find it busy)" if st == "fail" else ""))
+        elif cl:
+            msgs.append(f"stale close.lock (dead pid {cl['pid']}); the bot clears it")
+        if held and omt is not None and omt > 25:
+            st = "fail"
+            msgs.append(f"the options state lock has been held for {omt:.0f} min (a stuck live/run.py?)")
+        elif held:
+            msgs.append("options lock held (an intraday run in progress)")
+        add("readiness.locks", st, "; ".join(msgs) or "no locks held", {"close_lock": cl, "options_lock_held": held})
+        # 4. keys -------------------------------------------------------------------------
+        miss = [k for k in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY") if not SHORT_ENV.get(k)]
+        miss += [k for k in ("OPT_APCA_API_KEY_ID", "OPT_APCA_API_SECRET_KEY") if not OPT_ENV.get(k)]
+        soft = [k for k in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY") if not SHORT_ENV.get(k)]
+        add("readiness.keys", "fail" if miss else "warn" if soft else "ok",
+            ("missing: " + ", ".join(miss + soft)) if miss or soft else "Alpaca keys for both bots and Supabase present", {"missing": miss + soft})
+        # 5. schedule ---------------------------------------------------------------------
+        if role["role"] == "mac-cron":
+            lines = [l for l in (crontab_text() or "").splitlines() if l.strip() and not l.lstrip().startswith("#")]
+            need = {"shorting.close": r"daily\.py\s+--execute\s*(>|$)", "options.daily": r"live/run\.py\s+--execute\s*(>|$)",
+                    "shorting.fallback": r"daily\.py\s+(--execute\s+--fallback|--fallback\s+--execute)"}
+            gone = [n for n, pat in need.items() if not any(re.search(pat, l) for l in lines)]
+            add("readiness.schedule", "fail" if set(gone) - {"shorting.fallback"} else "warn" if gone else "ok",
+                ("cron lines missing: " + ", ".join(gone)) if gone else "15:40 close, 15:50 fallback and 15:45 options cron lines active", {"missing": gone})
+        else:
+            timers = ["clive-short-close.timer", "clive-short-fallback.timer", "clive-opt-daily.timer"]
+            try:
+                r = subprocess.run(["systemctl", "is-active", *timers], capture_output=True, text=True, timeout=10).stdout.split()
+            except Exception:
+                r = []
+            gone = [t for t, s in zip(timers, r + ["unknown"] * 3) if s != "active"]
+            add("readiness.schedule", "fail" if gone else "ok", ("timers not active: " + ", ".join(gone)) if gone else
+                "close, fallback and options timers active", {"inactive": gone})
+        # 6. network + Alpaca -------------------------------------------------------------
+        dns_bad = []
+        for h in ("paper-api.alpaca.markets", "data.alpaca.markets", "scanner.tradingview.com"):
+            try:
+                socket.getaddrinfo(h, 443)
+            except OSError:
+                dns_bad.append(h)
+        add("readiness.network", "fail" if dns_bad else "ok", ("DNS fails for " + ", ".join(dns_bad)) if dns_bad else
+            "DNS resolves Alpaca and TradingView", {"dns_fail": dns_bad})
+        probs, d = [], {}
+        try:
+            clk = with_retry(lambda: SHORT_API.get("/v2/clock"), tries=2)
+            d["is_open"], d["next_close"] = clk.get("is_open"), clk.get("next_close")
+            if not clk.get("is_open"):
+                probs.append("Alpaca says the market is closed")
+            a = p.short_account()
+            if a.get("status") != "ACTIVE" or a.get("trading_blocked") or not a.get("shorting_enabled"):
+                probs.append(f"shorting account {a.get('status')}, blocked={a.get('trading_blocked')}, shorting={a.get('shorting_enabled')}")
+        except Exception as e:
+            probs.append(f"shorting Alpaca unreachable: {scrub(e)[:120]}")
+        try:
+            o = p.opt_account()
+            if o.get("status") != "ACTIVE" or o.get("trading_blocked"):
+                probs.append(f"options account {o.get('status')}, blocked={o.get('trading_blocked')}")
+        except Exception as e:
+            probs.append(f"options Alpaca unreachable: {scrub(e)[:120]}")
+        add("readiness.alpaca", "fail" if probs else "ok", "; ".join(probs) or "both Alpaca accounts ACTIVE, market open", d)
+        # 7. resources --------------------------------------------------------------------
+        du = shutil.disk_usage(ROOT)
+        res, st = [f"{du.free / 1e9:.1f} GB disk free"], ("fail" if du.free < 1e9 else "ok")
+        if platform.system() == "Linux":
+            try:
+                m = parse_meminfo(Path("/proc/meminfo").read_text())
+                res.append(f"{m['avail_mb']} MB RAM + {m['swap_free_mb']} MB swap free")
+                st = worst([st, "fail" if m["avail_mb"] + m["swap_free_mb"] < 300 else "warn" if m["avail_mb"] < 200 else "ok"])
+            except OSError:
+                pass
+        add("readiness.resources", st, ", ".join(res))
+    bad = [r for r in rows if r[1] == "fail"]
+    for n, st, msg, d in rows:
+        p.add("readiness", n, st, msg, d, expected_at=close_at)
+    p.add("readiness", "readiness.summary", worst(r[1] for r in rows),
+          (f"NOT READY for the {hhmm} close: " + "; ".join(r[2] for r in bad)) if bad else
+          f"ready for the {hhmm} close and the options decision ({role['role']})", {"role": role["role"], "fails": len(bad)}, expected_at=close_at)
+
+
+# ====================================================================== 9. event-alert auto-resolution
+# The bots raise one-off EVENT alerts (cover_failed, run_failed, ...) that nothing resolves, so the
+# dashboard would keep them open forever. The probe resolves one once the evidence says the problem
+# is over. Idempotent, and safe next to the bots' own resolution: every PATCH is filtered on
+# resolved_at=is.null, so an alert already resolved (by a bot or an earlier probe) is never touched.
+BOT_OWNED_KINDS = {"position_loss", "book_loss", "long_loss", "long_outside_window", "drawdown_halt"}   # deduped; monitor.py resolves
+SHORTS_CLEARED_KINDS = {"cover_failed", "close_missed", "close_fallback", "overnight_leftover", "leftover_covered",
+                        "cover_blocked", "pdt_block", "vm_shorts_open"}
+LONGS_CLEARED_KINDS = {"long_exit_failed", "long_exit_late"}
+NEXT_SESSION_KINDS = {"run_failed", "scan_failed", "no_picks", "stale_picks", "calendar_failed", "job_locked", "stop_failed",
+                      "long_entry_failed", "daily_loss_halt", "pdt_limit", "vm_job_failed", "vm_missed_run", "vm_timer_inactive",
+                      "vm_healthcheck", "vm_heartbeat"}
+STALE_AFTER_SESSIONS = 3
+
+
+def plan_alert_resolution(alerts: list[dict], results: list[dict], cal: Calendar, now: dt.datetime) -> list[tuple[dict, str]]:
+    """[(alert, reason)] to resolve. Pure: open alerts rows, this run's check rows, the calendar.
+      shorts kinds   -> resolved when no short is left open (positions/shorting.leftover_shorts ok)
+      longs kinds    -> resolved when no sleeve long is outside its window
+      one-day kinds  -> resolved once a LATER session has run 30 min with no scheduler fail for that bot
+      other kinds    -> resolved as stale after 3 later sessions; deduped condition kinds: left to the bot
+    Nothing younger than 10 minutes is touched."""
+    st = {f"{r['component']}/{r['check_name']}": r["status"] for r in results}
+    shorts_ok = st.get("positions/shorting.leftover_shorts") == "ok"
+    longs_ok = st.get("positions/shorting.longs_window") == "ok" and st.get("state/shorting.overnight_longs") in ("ok", None)
+    sched_bad = {b: any(k.startswith(f"scheduler/{b}.") and v == "fail" for k, v in st.items()) for b in ("shorting", "options")}
+    started = [s for s in cal.sessions if s.open + dt.timedelta(minutes=30) <= now]
+    out = []
+    for a in alerts:
+        kind, bot = a.get("kind") or "", a.get("bot_id") or "shorting"
+        at = parse_ts(a.get("at"))
+        if not at or bot == "health" or kind in BOT_OWNED_KINDS or (now - at).total_seconds() < 600:
+            continue
+        later = [s for s in started if s.date > at.astimezone(ET).date()]
+        if kind in SHORTS_CLEARED_KINDS:
+            if shorts_ok:
+                out.append((a, "no shorts left open"))
+        elif kind in LONGS_CLEARED_KINDS:
+            if longs_ok:
+                out.append((a, "no sleeve longs outside the window"))
+        elif kind in NEXT_SESSION_KINDS:
+            if later and not sched_bad.get(bot, sched_bad["shorting"]):
+                out.append((a, f"the {later[0].date} session ran without a scheduler failure"))
+        elif len(later) >= STALE_AFTER_SESSIONS:
+            out.append((a, f"stale: {len(later)} sessions old"))
+    return out
+
+
+def check_alert_resolution(p: Probe):
+    if not SB.ok:
+        p.add("alerts", "alerts.auto_resolve", "unknown", "Supabase not configured")
+        return
+    rows = SB.try_get("alerts", "select=id,bot_id,kind,level,at&resolved_at=is.null&or=(bot_id.is.null,bot_id.neq.health)"
+                                "&order=at.desc&limit=500")
+    if rows is None:
+        p.add("alerts", "alerts.auto_resolve", "unknown", "open alerts unreadable (transient Supabase error)")
+        return
+    plan = plan_alert_resolution(rows, p.results, p.cal, p.now)
+    done, failed = [], None
+    if p.write and plan:
+        stamp = iso(dt.datetime.now(UTC))
+        for reason in sorted({r for _, r in plan}):
+            ids = [str(a["id"]) for a, r in plan if r == reason]
+            try:
+                SB.patch("alerts", f"id=in.({','.join(ids)})&resolved_at=is.null", {"resolved_at": stamp})
+                done += ids
+            except Exception as e:
+                failed = scrub(e)[:160]
+    kinds = sorted({a.get("kind") or "?" for a, _ in plan})
+    n = len(done) if p.write else len(plan)
+    verb = "resolved" if p.write else "would resolve"
+    detail = {"resolved": [{"id": a["id"], "kind": a.get("kind"), "reason": r} for a, r in plan][:50], "open_before": len(rows)}
+    p.add("alerts", "alerts.auto_resolve", "warn" if failed else "ok",
+          (f"{verb} {n} event alerts ({', '.join(kinds)}); {len(rows) - n} bot alerts still open" if plan else
+           f"{len(rows)} open bot alerts, none cleared yet") + (f"; resolve failed: {failed}" if failed else ""), detail)
+
+
 # ====================================================================== summary, write, alert
 def link_findings(p: Probe):
     """Say the consequence in the cause's message: a missed cover run plus open shorts."""
@@ -1395,7 +1919,8 @@ def link_findings(p: Probe):
 
 
 def summarize(p: Probe, started: float):
-    for comp in COMPONENTS:
+    extra = [c for c in dict.fromkeys(r["component"] for r in p.results) if c not in COMPONENTS and c not in ("summary", "health")]
+    for comp in COMPONENTS + extra:
         rows = [r for r in p.results if r["component"] == comp]
         st = worst(r["status"] for r in rows) if rows else "unknown"
         nf, nw = sum(r["status"] == "fail" for r in rows), sum(r["status"] == "warn" for r in rows)
@@ -1408,7 +1933,7 @@ def summarize(p: Probe, started: float):
 
 
 def alert_key(r: dict, host: str) -> str:
-    local = r["component"] in ("host", "state")
+    local = r["component"] in ("host", "state", "readiness")
     return f"health_{r['component']}_{r['check_name']}".replace(".", "_") + (f"@{host}" if local else "")
 
 
@@ -1443,7 +1968,8 @@ def write_and_alert(p: Probe, run_at: dt.datetime) -> list[str]:
             SB.insert("health_checks", rows)
             notes.append(f"wrote {len(rows)} health_checks rows")
         except Exception as e:
-            notes.append(f"health_checks insert failed ({scrub(e)[:160]}): apply dashboard/supabase/migrations/008_health.sql")
+            hint = ": apply dashboard/supabase/migrations/008_health.sql" if schema_missing(e) else " (transient; next run retries)"
+            notes.append(f"health_checks insert failed ({scrub(e)[:160]}){hint}")
     # local state: the fallback "previous run" when Supabase is unreachable
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1478,6 +2004,31 @@ def write_and_alert(p: Probe, run_at: dt.datetime) -> list[str]:
                 notes.append(f"resolved alert {key}")
             except Exception as e:
                 notes.append(f"alert resolve failed: {scrub(e)[:120]}")
+    # readiness: its alerts rows go through the loop above; its push is separate, loud, once per host per day
+    ready = next((r for r in p.results if r["check_name"] == "readiness.summary"), None)
+    if ready is None:
+        stale = [k for k in open_alerts if k.startswith("health_readiness_") and k.endswith(f"@{p.host}")]
+        for k in stale:            # the window is over: these alerts have done their job
+            try:
+                SB.patch("alerts", f"id=in.({','.join(str(i) for i in open_alerts[k])})&resolved_at=is.null", {"resolved_at": iso(dt.datetime.now(UTC))})
+                notes.append(f"resolved alert {k}")
+            except Exception as e:
+                notes.append(f"alert resolve failed: {scrub(e)[:120]}")
+    elif ready["status"] == "fail":
+        st = _load_json(STATE_FILE) or {}
+        sent = st.get("_readiness_pushed", {})
+        if sent.get(p.host) != p.today.isoformat():
+            bad = [r for r in p.results if r["component"] == "readiness" and r["status"] == "fail" and r is not ready]
+            body = "\n".join(f"- {r['message']}" for r in bad[:8]) + f"\nFix it before the close job runs. {DASHBOARD_URL}/health"
+            if push_ntfy(f"Clive NOT READY on {p.host}: the close job is at risk", body, "critical"):
+                notes.append("readiness ntfy push sent")
+            sent[p.host] = p.today.isoformat()
+            st["_readiness_pushed"] = sent
+            try:
+                STATE_FILE.write_text(json.dumps(st, indent=1))
+            except OSError:
+                pass
+    new_fails = [r for r in new_fails if r["component"] != "readiness"]
     if new_fails:
         body = "\n".join(f"- {r['message']}" for r in new_fails[:8]) + (f"\n(+{len(new_fails) - 8} more)" if len(new_fails) > 8 else "")
         if push_ntfy(f"Clive health: {len(new_fails)} new FAIL on {p.host}", body + f"\n{DASHBOARD_URL}/health", "critical"):
@@ -1516,6 +2067,8 @@ def main(argv=None) -> int:
     ap.add_argument("--now", default=None, help="judge the schedule as of this ET time, e.g. 2026-10-22T16:30")
     ap.add_argument("--json", action="store_true", help="with --dry-run: print the rows as JSON")
     ap.add_argument("--only", default=None, help="comma list of components to run (testing)")
+    ap.add_argument("--readiness", action="store_true",
+                    help="run the pre-close readiness checks now (they run by themselves at 15:30 ET, 12:30 on half days)")
     a = ap.parse_args(argv)
     started = time.monotonic()
     host = a.host or os.environ.get("HEALTH_HOST") or os.environ.get("CLIVE_HOST") or socket.gethostname()
@@ -1527,6 +2080,10 @@ def main(argv=None) -> int:
     p = Probe(now, host)
     p.write = not a.dry_run
     try:
+        p.role = trading_role()
+    except Exception:
+        pass
+    try:
         p.cal = Calendar(p.today)
     except Exception as e:                       # cannot happen (fallback inside), but never crash
         p.add("scheduler", "calendar", "fail", f"calendar: {scrub(e)}")
@@ -1536,6 +2093,9 @@ def main(argv=None) -> int:
             ("positions", "options", check_positions_options), ("accounts", "accounts", check_accounts),
             ("data", "data", check_data), ("state", "state", check_state), ("supabase", "supabase", check_supabase),
             ("host", "host", check_host)]
+    if a.readiness or readiness_due(p):
+        plan.append(("readiness", "readiness.summary", check_readiness))
+    plan.append(("alerts", "alerts.auto_resolve", check_alert_resolution))     # last: it reads the rows above
     for comp, name, fn in plan:
         if only and comp not in only:
             continue

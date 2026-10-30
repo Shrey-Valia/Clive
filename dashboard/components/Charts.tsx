@@ -143,7 +143,7 @@ export function PnlBars({ points, equity, height = 220, ariaLabel, group, firstI
           <path key={i} d={bar(i, v)} className={v > 0 ? "bar-pos" : "bar-neg"} opacity={hi === null || hi === i ? 1 : 0.45} />
         ))}
         <line x1={M.left} x2={M.left + iw} y1={zero} y2={zero} className="baseline" />
-        {[best, worst].filter((i, k, a) => i >= 0 && a.indexOf(i) === k).map((i) => {
+        {usable.filter((v) => v !== null).length >= 2 && [best, worst].filter((i, k, a) => i >= 0 && a.indexOf(i) === k).map((i) => {
           const v = usable[i] as number;
           return <text key={`l${i}`} x={Math.min(Math.max(cx(i), M.left + 30), M.left + iw - 30)} y={v >= 0 ? y(v) - 5 : y(v) + 12} className="axis lbl" textAnchor="middle">{v >= 0 ? "BEST " : "WORST "}{sUsd(v, 0)}</text>;
         })}

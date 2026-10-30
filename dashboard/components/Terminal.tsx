@@ -73,7 +73,7 @@ function useNow() {
   return now;
 }
 
-export function TopBar({ demo, tickers = [], flow = "overnight_v1", health = null }: { demo: boolean; tickers?: string[]; flow?: Flow; health?: HealthPillData | null }) {
+export function TopBar({ demo, tickers = [], flow = "intraday_v2", health = null }: { demo: boolean; tickers?: string[]; flow?: Flow; health?: HealthPillData | null }) {
   const path = usePathname();
   const router = useRouter();
   const now = useNow();

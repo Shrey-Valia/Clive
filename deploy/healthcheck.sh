@@ -115,7 +115,7 @@ job_status() {  # job_status JOB -> ok | skipped | off | failed:<line> | missing
 
 # ================================================================== --failed JOB
 if [[ "$action" == "failed" ]]; then
-  [[ "$mode" == "off" ]] && exit 0
+  [[ "$mode" == "off" ]] && { log "mode off: not alerting for ${failed_job}"; exit 0; }
   tail_lines="$(journalctl -q --no-pager -o cat -u "clive-job@${failed_job}.service" -n 6 2>/dev/null | cut -c1-200)"
   level="warning"; prio="high"
   case "$failed_job" in short-open|short-close|short-halfday|short-fallback|short-halfday-fallback|short-cover-leftovers|opt-sweep|opt-daily|opt-halfday)
