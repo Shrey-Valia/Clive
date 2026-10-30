@@ -3,3 +3,11 @@
 output/
 __pycache__/
 *.pyc
+
+# Local Netlify folder
+.netlify
+
+# macOS, local tooling
+.DS_Store
+.claude/
+supabase/.temp/
