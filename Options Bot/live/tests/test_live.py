@@ -564,8 +564,14 @@ def test_non_paper_account_number_refused():
     assert all(u.startswith("https://paper-api.alpaca.markets") for _, u in s.calls)
 
 
-def test_shorting_keys_never_reach_trading_host():
+def test_shorting_keys_never_reach_trading_host(tmp_path, monkeypatch):
+    # hermetic: a fake shorting .env (the real one only exists in the main checkout, so this test
+    # used to fail in a fresh worktree / CI)
+    sh = tmp_path / "shorting.env"
+    sh.write_text("APCA_API_KEY_ID=PKSHORTINGFAKE\nAPCA_API_SECRET_KEY=fake\n")
+    monkeypatch.setattr(C, "SHORTING_ENV_PATH", sh)
     b = Broker(execute=False, env={})                              # data falls back to shorting keys
+    assert b.data_creds.source == "shorting-readonly"
     assert not b.has_trading
     assert b.positions() == [] and b.account()["simulated"]
     with pytest.raises(Exception):

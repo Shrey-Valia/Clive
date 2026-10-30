@@ -178,7 +178,8 @@ def test_cover_leftovers_knows_todays_shorts_from_the_guard_too(midday, fdb):
     fake.short("A", 25, 20.0)
     daily.write_guard(today(), [{"id": "x", "ticker": "A", "side": "sell", "purpose": "short"}], daily.OPEN_GUARD)
     assert run_daily("--cover-leftovers", "--execute") == 0
-    assert fake.orders == []
+    # not covered; round 3 STOP_REPAIR (on) gives today's stop-less short its +35% stop
+    assert [(o["side"], o.get("stop_price")) for o in fake.orders] == [("buy", 27.0)]
 
 
 def test_cover_leftovers_refuses_to_guess(midday, fdb):

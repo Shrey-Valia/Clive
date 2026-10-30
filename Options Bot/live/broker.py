@@ -80,6 +80,11 @@ def is_bot_order(o: dict) -> bool:
     return str(o.get("client_order_id") or "").startswith(C.ORDER_PREFIX)
 
 
+def is_resting_order(o: dict) -> bool:
+    """A resting GTC order the bot staged on purpose (take-profit / overnight expiry exit)."""
+    return str(o.get("client_order_id") or "").startswith(C.REST_ORDER_PREFIX)
+
+
 def _f(x, default=0.0):
     try:
         return float(x)
@@ -260,7 +265,8 @@ class Broker:
                 return found
         raise last
 
-    def submit_mleg(self, legs: list[dict], qty: int, limit_price: float, client_order_id: str) -> dict:
+    def submit_mleg(self, legs: list[dict], qty: int, limit_price: float, client_order_id: str,
+                    time_in_force: str = "day") -> dict:
         if len(legs) > 4:                           # Alpaca mleg: at most 4 legs (a condor is exactly 4)
             raise SafetyError(f"mleg order allows at most 4 legs, got {len(legs)}")
         if len({l["symbol"] for l in legs}) != len(legs):
@@ -270,12 +276,16 @@ class Broker:
                or not str(l.get("position_intent")).startswith(l.get("side", "?"))]
         if bad:
             raise SafetyError(f"mleg leg has an invalid side / position_intent / ratio_qty: {bad[0]}")
+        if time_in_force not in ("day", "gtc"):         # Alpaca options: day | gtc only
+            raise SafetyError(f"options time_in_force must be day or gtc, got {time_in_force!r}")
+        if time_in_force == "gtc" and not client_order_id.startswith(C.REST_ORDER_PREFIX):
+            raise SafetyError("a GTC order must carry the resting-order prefix so every run can find it")
         body = {"order_class": "mleg", "qty": str(int(qty)), "type": "limit",
-                "limit_price": f"{limit_price:.2f}", "time_in_force": "day",
+                "limit_price": f"{limit_price:.2f}", "time_in_force": time_in_force,
                 "client_order_id": client_order_id[:128],
                 "legs": [{"symbol": l["symbol"], "ratio_qty": str(l.get("ratio_qty", 1)),
                           "side": l["side"], "position_intent": l["position_intent"]} for l in legs]}
-        log.info("submit mleg qty=%s limit=%.2f %s", qty, limit_price,
+        log.info("submit mleg %s qty=%s limit=%.2f %s", time_in_force, qty, limit_price,
                  " ".join(f"{l['position_intent']}:{l['symbol']}" for l in legs))
         return self._post_order(body)
 
@@ -302,13 +312,15 @@ class Broker:
     def cancel_order(self, order_id: str) -> None:
         self._trade("DELETE", f"/v2/orders/{order_id}", mutate=True)
 
-    def cancel_all(self, timeout: float = 30.0) -> list[dict]:
+    def cancel_all(self, timeout: float = 30.0, include_resting: bool = False) -> list[dict]:
         """Cancel the bot's own open orders (client_order_id 'options-...') and wait
-        until none is open. Orders the bot did not send are never touched.
+        until none is open. Orders the bot did not send are never touched. Resting
+        GTC orders ('options-rest-...') are kept unless ``include_resting``.
         Returns the bot orders still open at the timeout (normally [])."""
         waited, delay = 0.0, 0.5
         while True:
-            mine = [o for o in self.open_orders() if is_bot_order(o)]
+            mine = [o for o in self.open_orders() if is_bot_order(o)
+                    and (include_resting or not is_resting_order(o))]
             if not mine:
                 return []
             for o in mine:
@@ -359,6 +371,21 @@ class Broker:
         return self.activities(["FILL"], after)
 
     # ------------------------------------------------------------ market data (data host, read-only)
+    def cash_dividends(self, symbol: str, start: dt.date, end: dt.date) -> list[dict]:
+        """Past / announced cash dividends [{ex_date, rate}] from Alpaca's corporate-actions data
+        endpoint (read-only). SPY only announces a few days ahead, so callers combine this with
+        the quarterly rule (strategy.exdiv_dates)."""
+        js = self._data("/v1/corporate-actions", {"symbols": symbol, "types": "cash_dividend",
+                                                  "start": start.isoformat(), "end": end.isoformat()})
+        rows = (js.get("corporate_actions") or {}).get("cash_dividends") or []
+        out = []
+        for d in rows:
+            try:
+                out.append({"ex_date": dt.date.fromisoformat(d["ex_date"]), "rate": float(d["rate"])})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return sorted(out, key=lambda x: x["ex_date"])
+
     def daily_bars(self, symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
         """Split-adjusted daily OHLCV (SIP), dates [start, end]. Free plans allow
         SIP history older than 15 minutes, so ``end`` should be before today."""

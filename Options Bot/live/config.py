@@ -152,6 +152,71 @@ STEP_WAIT_SECONDS = 30          # max time each price stays working (5 prices fi
 POLL_SECONDS = 3
 TICK = 0.01
 
+# ---------------------------------------------------------------- round 3 (docs/ENGINEERING_ROUND3.md)
+# Host-death resilience. Alpaca mleg orders fill as one unit (all legs or none), so a host that dies
+# mid-run can never leave half a spread; what it can leave is (a) a DAY order still working until the
+# close and (b) fills the bot never booked. Both are handled below.
+#
+# Write-ahead journal of in-flight orders (state/inflight.json): written before the first submit,
+# cleared once every fill is booked. A run that finds one left by a dead run looks each order up by
+# client_order_id, cancels any still open, and books the fills with the planned metadata (entry mid,
+# signal, exit reason) instead of adopting the spread blind. Bookkeeping only; no order is sent.
+RECOVER_INFLIGHT = True
+# Resting ("exchange-side") GTC mleg limit orders, so a take-profit / an overdue expiry exit does not
+# depend on this host being up. Alpaca: options TIF day|gtc; mleg orders only market|limit (no stop),
+# so a stop cannot rest at Alpaca for a spread. Resting orders use client_order_id "options-rest-...",
+# are left alone by the leftover-order cancel at the start of a run, and are canceled (and confirmed)
+# before the bot works any order on the same spread.
+STAGE_TP_ORDERS = False             # dip spreads: rest a GTC close at entry_mid * (1 - TAKE_PROFIT) after entry
+REST_UNFILLED_EXPIRY_EXITS = False  # an expiry exit still unfilled at the close rests overnight as a GTC
+                                    # close at its cutoff price, so it works at the next open (09:30)
+                                    # even if the 09:45 sweep never runs
+REST_ORDER_PREFIX = ORDER_PREFIX + "rest-"
+# Dip sleeve: same expiry-day deadline as the condor (no order started or worked on expiry day at or
+# after 15:00 ET; Alpaca sells out ITM positions without buying power "within 1 hour before expiry").
+DIP_EXPIRY_DAY_DEADLINE_ENABLED = False
+
+# Early-assignment guard for the condor's SHORT CALL around SPY's ex-dividend date. SPY goes ex on
+# the third Friday of Mar/Jun/Sep/Dec (the previous session when that is a holiday), which is the
+# monthly expiry the condor targets, so the condor's last day (expiry - 1 session) is the last
+# cum-dividend session: the day a call holder exercises early to collect the dividend. The guard
+# closes the condor at the daily run on the last cum-dividend session before an ex-date inside the
+# position's life when the short call is in the money and its extrinsic value is below the expected
+# dividend (rational early exercise). Safety fix, default ON; set False for the research behaviour.
+CONDOR_EXDIV_GUARD = True
+CONDOR_EXDIV_INTRADAY_FROM = "15:00"   # ... and from this time the intraday runs on that day too
+EXDIV_QUARTER_MONTHS = {"SPY": (3, 6, 9, 12)}
+DIVIDEND_ESTIMATE = {"SPY": 2.00}      # $/share, used when Alpaca has no recent dividend (2026: 1.80-1.90)
+EXDIV_ITM_BUFFER = 0.0                 # $ of spot above the short call strike that already counts as ITM
+
+# Entry ladders. Alpaca PAPER fills a limit order only when it is marketable against the NBBO, with no
+# price improvement and no queue for resting limits (docs: Paper Trading). An mleg credit is marketable
+# when its limit <= the combo's natural credit (sell bids - buy asks). The default "halfway" ladder stops
+# halfway between mid and natural, so on paper it fills only if the market moves through it (2026-10-23:
+# the first condor, mid 2.29 / natural 2.13, ladder 2.28 -> 2.20, did not fill).
+# "natural": walk from the mid to max(natural, backtest-assumed credit). The backtest (optionsbot.engine
+# default Costs, which the frozen finalists use) filled every leg at its close mark -/+ slip, slip =
+# min(0.25, max(0.03, 2% of the leg price)); for that condor that is ~2.09, below the natural, so filling
+# at the natural is still better than the research assumed. The ladder never goes below the
+# backtest-assumed credit: when the natural is worse than that, the last price is the backtest credit.
+CONDOR_ENTRY_LADDER = "halfway"     # "halfway" (as before) | "natural"
+DIP_ENTRY_LADDER = "halfway"        # same choice for dip entries
+BT_SLIP_ABS, BT_SLIP_PCT, BT_SLIP_CAP = 0.03, 0.02, 0.25    # optionsbot.engine.Costs defaults, per leg
+# Start the condor entry at the start of the daily run (cron 15:45) instead of the 15:55 decision time:
+# the condor has no close-dependent signal, and the research filled it at the close anyway. The first
+# attempt works from ~15:46 until CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE before the decision time; if it
+# does not fill, the 15:55 run tries again with its own ladder, and a flat sleeve retries at every daily
+# run after that.
+CONDOR_ENTRY_EARLY = False
+CONDOR_EARLY_END_MINUTES_BEFORE_DECIDE = 1
+CONDOR_EARLY_STEP_SECONDS = 90
+
+# Execution quality: every order journal row (and options_live_orders, migration 009) records the
+# planned mid and natural and the slippage of the fill vs the mid (per share, and $ per order).
+# Monitoring parity with the shorting bot: alerts rows (bot_id 'options') + ntfy push.
+ALERTS_ENABLED = True
+ALERTS_PUSH = True                  # ntfy, when NTFY_TOPIC is found (process env, Options .env, Shorting .env)
+
 
 @dataclass(frozen=True)
 class Creds:
@@ -266,6 +331,22 @@ def data_creds(env: dict | None = None) -> Creds:
     if k and s:
         return Creds(k, s, "shorting-readonly")
     raise ConfigError("No market-data keys: set OPT_APCA_* in Options Bot/.env.")
+
+
+def ntfy_settings() -> tuple[str, str]:
+    """(topic, server) for ntfy pushes. The process env wins when the name is set at all, even
+    empty (the deploy kit blanks NTFY_TOPIC in shadow mode); then Options Bot/.env, then
+    Stock Shorting Bot/.env, where the owner's topic lives. Only these two names are read from
+    the shorting .env."""
+    def get(name: str) -> str:
+        if name in os.environ:
+            return os.environ[name].strip()
+        for path in (ENV_PATH, SHORTING_ENV_PATH):
+            v = _read_env_file(path).get(name, "").strip()
+            if v:
+                return v
+        return ""
+    return get("NTFY_TOPIC"), (get("NTFY_SERVER") or "https://ntfy.sh").rstrip("/")
 
 
 def universe() -> list[str]:

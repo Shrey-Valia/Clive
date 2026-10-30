@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from live import config as C  # noqa: E402
-from live import db, state  # noqa: E402
+from live import alerts, db, state  # noqa: E402
 from live import strategy as S  # noqa: E402
 from live.broker import ET, Broker  # noqa: E402
 from live.run import CONDOR_TRADE_COLS, TRADE_COLS, log, setup_logging  # noqa: E402
@@ -108,11 +108,13 @@ def main() -> int:
                + (f", {len(crows)} condors" if crows else "")
                + (f", {len(orphans)} UNPAIRED legs" if orphans else ""))
         log.info("sync: %s; %d trades in journal", msg, len(trades) + len(ctrades))
-        db.heartbeat("warning" if orphans else "ok", msg)
+        db.heartbeat("warning" if orphans else "ok", msg, source="sync")
+        alerts.resolve_one("sync_failed", None)
         return 0
     except Exception as e:
         log.error("sync failed: %s", e)
-        db.heartbeat("error", f"{today}: sync failed: {e}")
+        db.heartbeat("error", f"{today}: sync failed: {e}", source="sync")
+        alerts.raise_alert("sync_failed", f"{today}: sync failed: {type(e).__name__}: {str(e)[:300]}", level="warning")
         return 1
 
 

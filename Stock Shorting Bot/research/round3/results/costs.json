@@ -1,0 +1,12 @@
+{
+ "tod": [
+  2.95,
+  2.66,
+  2.15,
+  1.88,
+  1.48,
+  1.08
+ ],
+ "auction": 1.0,
+ "note": "multipliers on round-1 base cost; auction print = base"
+}

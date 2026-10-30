@@ -85,6 +85,63 @@ LEFTOVER_FILL_WAIT_SECONDS = 150 # leftover covers (no close cutoff nearby): Alp
 CANCEL_WAIT_SECONDS = 30         # wait this long for a cancel to land; paper took ~19 s on 2026-10-23
 ALPACA_TIMEOUT_SECONDS = 15      # every Alpaca HTTP call (alpaca-py sets none)
 
+# ---------------------------------------------------------------- execution round 3 (docs/EXECUTION_ROUND3.md)
+# Exchange-staged exit: a market-on-close (time_in_force cls) buy-to-cover resting at Alpaca, so
+# the close covers the short even if this Mac is asleep at 15:55. Alpaca facts this relies on:
+# cls orders are rejected 15:50-19:00 ET (staged earlier they rest until the closing auction);
+# an open buy reserves its qty of the short, so a DAY buy-stop and a cls buy for the SAME shares
+# cannot both rest ("insufficient qty available"), and no order class pairs a stop with a cls
+# leg. Hence the modes:
+#   "off"      today's behaviour: DAY buy-stop at +BROKER_STOP_PCT, market cover at 15:55
+#   "full"     09:31: a cls buy for every filled share, NO broker stop (the MOC replaces it)
+#   "split"    09:31: a stop on ceil(qty x MOC_SPLIT_STOP_FRACTION) shares, a cls buy on the rest.
+#              The two never cover the same share; host dead -> the MOC part closes at the close,
+#              the stop part is held overnight (as now) unless the stop fired
+#   "handoff"  the stop as now; from MOC_HANDOFF_AT (and at the start of the 15:40 job) a run
+#              cancels the stop and stages a cls buy for the whole short. Host needed once,
+#              any time between MOC_HANDOFF_AT and 15:49, instead of 15:55-15:58
+# With any mode on, the 15:55 cover, the 15:50 fallback and the catch-ups never cancel a staged
+# MOC (it cannot be cancelled after 15:50 anyway) and cover only the shares it does not reserve.
+# Paper: Alpaca fills a cls order like a market order at the close, not at the auction price, and
+# may fill it partly and expire the rest (the 09:31 leftover cover catches that). LIVE: Alpaca
+# staff say MOC needs the "elite" order routing - confirm with Alpaca before going live.
+STAGED_MOC_COVER = "off"
+MOC_SPLIT_STOP_FRACTION = 0.5     # "split": share of each short protected by the stop
+MOC_HANDOFF_AT = (14, 0)          # "handoff": earliest ET time a run swaps the stop for the MOC (the 14:00
+                                  # --cover-leftovers cron run does it; the 15:40 job always does)
+MOC_STAGE_BY_MINUTES_BEFORE_CLOSE = 11   # no new cls order after 15:49 (Alpaca's cutoff is 15:50)
+# The 15:40 job, host alive, may take a staged MOC back before Alpaca's 15:50 cutoff and cover at
+# 15:55 at market as before: "overlap" = only names in today's picks (the long sleeve buys them at
+# 15:55, which a resting cls cover would block), "all" = every name (the MOC is pure insurance),
+# "none" = never (every staged name closes in the auction).
+MOC_RELEASE = "overlap"
+MOC_RELEASE_MINUTES_BEFORE_CLOSE = 12    # release cancels go out by 15:48, leaving time to confirm
+# 09:31 entries: wait for each entry to finish (poll, returns early) before its stop / MOC goes
+# out. Bug fix, on: paper took 1-3 min to fill at the open on 2026-10-23, so after the old 30 s
+# wait most entries had no fill and got no stop, and a stop sent against a still-working sell is
+# rejected as a potential wash trade. An entry still working after this gets its protection
+# from the next --cover-leftovers run (stop_missing alert meanwhile).
+ENTRY_FILL_WAIT_SECONDS = 150
+# The --cover-leftovers runs (10:00 / 12:00 / 14:00) give a short opened today that has no open
+# order at all its broker stop (the 09:31 run skipped it: entry still working, or the stop was
+# rejected). Bug fix, on: every v2 short is meant to carry the +BROKER_STOP_PCT stop.
+STOP_REPAIR = True
+# Open-execution quality. "market" = today. "limit_collar" = a marketable DAY limit: short at
+# bid x (1 - ENTRY_COLLAR_PCT/100); what is unfilled after ENTRY_FILL_WAIT_SECONDS is cancelled
+# (no chase: a name that ran away from the collar is skipped for the day).
+ENTRY_ORDER = "market"
+ENTRY_COLLAR_PCT = 1.0
+# Covers: "limit_collar" sends the FIRST pass as a DAY limit at ask x (1 + COVER_COLLAR_PCT/100);
+# every later pass is a market order. Off ("market") by default: a cover must get done.
+COVER_ORDER = "market"
+COVER_COLLAR_PCT = 1.0
+# Cover loop: True = after the first pass, a working cover (new / accepted / partially filled)
+# is never cancelled; the loop keeps polling it (progress-aware) and sends only the shares no
+# working buy covers. False = today's cancel / re-read / re-send per pass. The 2026-10-23 open
+# cancelled five market covers that were about to fill and re-sent them.
+COVER_KEEP_WORKING = False
+COVER_STALL_SECONDS = 20          # keep waiting past the pass wait while fills move within this
+
 # Next-open entry (v2). cron starts `daily.py --open --execute` at 09:31.
 PICKS_FILE = os.path.join(LOG_DIR, "next_open_picks.json")
 ENTRY_MINUTES_AFTER_OPEN = 1     # short at 09:31
@@ -95,6 +152,22 @@ ENTRY_CUTOFF_MINUTES_AFTER_OPEN = 20   # a late start (Mac asleep) enters nothin
 # does the same cover at any time in market hours (10:00, 12:00, 14:00 cron lines).
 COVER_LEFTOVERS_AT_OPEN = True
 MAX_GAP_UP_PCT = 40.0            # skip a pick that opens more than this % above its scan price
+
+# Round 3 (research/round3/REPORT.md), OFF. How the v2 short is entered:
+#   "market"  v2: DAY market sell at 09:31 (ENTRY_MINUTES_AFTER_OPEN)
+#   "opg"     market-on-open: when the --open job starts before the OPG cutoff (09:28; move its cron
+#             line to 09:20), each pick is sold short in the opening auction, sized on the latest
+#             premarket print, with the same borrow / price / MAX_GAP_UP_PCT checks against that print.
+#             A pick the overnight long sleeve still holds cannot be shorted in the same auction it is
+#             sold in, so it (and any pick the auction pass skipped or Alpaca rejected) goes through the
+#             09:31 market path as today. Not used when the PDT cap or a daily-loss / drawdown halt is
+#             configured or applies (those are checked at 09:31). Broker stops (BROKER_STOP_PCT) are
+#             placed at 09:31 on the auction fills.
+# Backtest 2016-2026 (round 3): opening-auction entry + no broker stop + close exit: IS Sharpe 1.44,
+# OOS 1.19 vs v2 live 1.14 / 0.81. With the 35% stop kept, auction entry is WORSE out of sample
+# (OOS 0.60): the open print is stopped out by first-minute spikes. Use "opg" only with
+# BROKER_STOP_PCT = None, an owner decision on tail risk (worst single short then -51% vs -37%).
+ROUND3_SHORT_ENTRY_ORDER = "market"
 
 # ---------------------------------------------------------------- overnight long sleeve (on)
 # Penny Research "LS1 flip": buy v2's own picks at T 15:55 (after the cover-all), sell them at
@@ -186,6 +259,12 @@ NEWS_LOOKBACK_HOURS = 36
 # ---------------------------------------------------------------- monitor.py (alerts only, never trades)
 ALERT_POSITION_LOSS_PCT = 25.0   # a position this % against us
 ALERT_BOOK_LOSS_PCT = 5.0        # open positions down this % of equity in total
+# Event alerts (no_picks, cover_failed, leftover_covered, ...) are one row per event and had no
+# way to clear. True: sync.py (16:15) resolves event alerts from earlier sessions, and the
+# leftover / cover-failure kinds resolve as soon as a later check (daily.py's leftover check,
+# sync.py's positions) confirms no short from an earlier session is open. Dashboard-only: no
+# order depends on it. docs/EXECUTION_ROUND3.md "Event-alert hygiene".
+AUTO_RESOLVE_EVENT_ALERTS = False
 MONITOR_START = (9, 45)          # ET window monitor.py acts in; cron fires */15 9-15
 MONITOR_END = (15, 45)
 

@@ -113,6 +113,19 @@ def update(table: str, match: dict, values: dict) -> None:
         log.error("supabase %s update failed: %s", table, e)
 
 
+def update_where(table: str, params: dict, values: dict) -> list[dict]:
+    """PATCH with raw PostgREST filters, e.g. {"kind": "in.(a,b)", "resolved_at": "is.null"}.
+    Returns the updated rows ([] when off or on any error). Refuses an empty filter."""
+    if not enabled() or not params:
+        return []
+    try:
+        r = _send("PATCH", table, {k: _clean(v) for k, v in values.items()}, params, "return=representation")
+        return r.json() if r is not None else []
+    except Exception as e:
+        log.error("supabase %s update failed: %s", table, e)
+        return []
+
+
 def delete(table: str, match: dict) -> None:
     if not enabled():
         return

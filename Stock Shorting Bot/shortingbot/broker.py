@@ -1,4 +1,4 @@
-"""Alpaca paper account: reads, borrow checks, and plain market orders."""
+"""Alpaca paper account: reads, borrow checks, market / limit / market-on-close orders."""
 from __future__ import annotations
 
 import datetime as dt
@@ -162,13 +162,46 @@ def prev_session(before: dt.date) -> dt.date | None:
     return earlier[-1] if earlier else None
 
 
-def cancel_open_orders(symbols: list[str] | None = None) -> int:
-    """Cancel open orders, all of them or only those on `symbols`. Returns how many were open.
-    Each cancel is tried on its own: one that fails (a stop filling meanwhile) is logged and the
-    rest still go. The caller waits and re-reads holdings either way."""
-    open_orders = client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+def _tif(o) -> str:
+    v = getattr(o, "time_in_force", None)
+    return str(getattr(v, "value", v) or "").lower()
+
+
+def is_staged_moc(o) -> bool:
+    """An open market-on-close buy (time_in_force cls): a staged cover (STAGED_MOC_COVER) or one
+    sent by hand. Accepts an alpaca-py order or an open_orders() dict."""
+    if isinstance(o, dict):
+        return o.get("tif") == "cls" and o.get("side") == "buy"
+    return _tif(o) == "cls" and str(getattr(o.side, "value", o.side)).lower() == "buy"
+
+
+def open_orders(symbols: list[str] | None = None) -> list[dict]:
+    """Open orders (on `symbols`) as dicts: id, ticker, side, type, tif, qty, filled_qty,
+    remaining, status, client_order_id, stop_price, limit_price. Read-only."""
+    out = []
+    for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)):
+        if symbols is not None and o.symbol not in set(symbols):
+            continue
+        qty, filled = float(o.qty or 0), float(o.filled_qty or 0)
+        out.append({"id": str(o.id), "ticker": o.symbol, "side": str(getattr(o.side, "value", o.side)),
+                    "type": str(getattr(o.order_type, "value", getattr(o, "type", "")) or ""), "tif": _tif(o),
+                    "qty": qty, "filled_qty": filled, "remaining": max(0.0, qty - filled),
+                    "status": str(getattr(o.status, "value", o.status)), "client_order_id": o.client_order_id,
+                    "stop_price": float(o.stop_price) if getattr(o, "stop_price", None) else None,
+                    "limit_price": float(o.limit_price) if getattr(o, "limit_price", None) else None})
+    return out
+
+
+def cancel_open_orders(symbols: list[str] | None = None, keep=None) -> int:
+    """Cancel open orders, all of them or only those on `symbols`. Returns how many were open
+    (and not kept). `keep(order) -> True` leaves an order alone (the 15:55 cover keeps staged
+    MOC covers: is_staged_moc). Each cancel is tried on its own: one that fails (a stop filling
+    meanwhile) is logged and the rest still go. The caller waits and re-reads holdings either way."""
+    open_orders = client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
     if symbols is not None:
         open_orders = [o for o in open_orders if o.symbol in set(symbols)]
+    if keep is not None:
+        open_orders = [o for o in open_orders if not keep(o)]
     for o in open_orders:
         try:
             client().cancel_order_by_id(o.id)
@@ -177,10 +210,15 @@ def cancel_open_orders(symbols: list[str] | None = None) -> int:
     return len(open_orders)
 
 
-def open_order_symbols(symbols: list[str]) -> list[str]:
-    """Which of `symbols` still have an open order."""
-    return sorted({o.symbol for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
-                   if o.symbol in set(symbols)})
+def cancel_order(order_id: str) -> None:
+    """Cancel one order by id (raises on failure: "order pending cancel", already filled, ...)."""
+    client().cancel_order_by_id(order_id)
+
+
+def open_order_symbols(symbols: list[str], ignore=None) -> list[str]:
+    """Which of `symbols` still have an open order (`ignore(order) -> True` ones don't count)."""
+    return sorted({o.symbol for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
+                   if o.symbol in set(symbols) and not (ignore and ignore(o))})
 
 
 def is_duplicate_id_error(e) -> bool:
@@ -188,15 +226,25 @@ def is_duplicate_id_error(e) -> bool:
     return "client_order_id" in t and ("unique" in t or "duplicate" in t or "exists" in t)
 
 
+def is_server_error(e) -> bool:
+    """An HTTP 5xx from Alpaca (APIError.status_code): the order may or may not have been taken."""
+    try:
+        return int(getattr(e, "status_code", 0) or 0) >= 500
+    except (TypeError, ValueError):
+        return False
+
+
 def _send(req):
     """submit_order with a client_order_id. alpaca-py re-POSTs on a 429/504; if the first POST
-    went through, the retry is rejected as a duplicate id. That, or a timeout, is looked up by
-    the id: an order found there was already sent and is returned instead of sending again."""
+    went through, the retry is rejected as a duplicate id. That, a timeout, or a 5xx (Alpaca may
+    have taken the order before failing) is looked up by the id: an order found there was
+    already sent and is returned instead of sending again (or being recorded as rejected)."""
     try:
         return client().submit_order(req)
     except Exception as e:
         coid = getattr(req, "client_order_id", None)
-        if not coid or not (is_duplicate_id_error(e) or isinstance(e, requests.exceptions.RequestException)):
+        if not coid or not (is_duplicate_id_error(e) or isinstance(e, requests.exceptions.RequestException)
+                            or is_server_error(e)):
             raise
         try:
             o = client().get_order_by_client_id(coid)
@@ -223,6 +271,54 @@ def submit_stop(ticker: str, qty: int, stop_price: float, client_order_id: str |
     return order_dict(o)
 
 
+def submit_moc(ticker: str, qty: int, side: str = "buy", client_order_id: str | None = None) -> dict:
+    """Market-on-close (time_in_force cls). Alpaca rejects cls orders sent between 15:50 and 19:00
+    ET; one accepted earlier rests until the closing auction and is cancelled if unfilled after
+    it. A cls buy reserves its qty of the short: another buy for the same shares is rejected
+    "insufficient qty available"."""
+    o = _send(MarketOrderRequest(
+        symbol=ticker, qty=qty, side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+        time_in_force=TimeInForce.CLS, client_order_id=client_order_id))
+    return order_dict(o)
+
+
+def submit_limit(ticker: str, qty: float, side: str, limit_price: float, client_order_id: str | None = None) -> dict:
+    """DAY limit order (the marketable-limit-with-collar entries / covers)."""
+    o = _send(LimitOrderRequest(
+        symbol=ticker, qty=qty, side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+        time_in_force=TimeInForce.DAY, limit_price=round(limit_price, 2), client_order_id=client_order_id))
+    return order_dict(o)
+
+
+TERMINAL = ("filled", "canceled", "expired", "rejected", "done_for_day", "replaced")
+
+
+def wait_filled_progress(order_ids: list[str], seconds: float, extend_until: float | None = None,
+                         stall_seconds: float = 20) -> list[dict]:
+    """Like wait_filled, but past `seconds` it keeps polling (up to the epoch time `extend_until`)
+    while the orders are still making progress: some filled qty moved within `stall_seconds`, or
+    an order is still pending_new / accepted (Alpaca paper took ~18 s to accept at the open)."""
+    start = time.time()
+    deadline = start + seconds
+    hard = max(deadline, extend_until or deadline)
+    last, moved_at = None, start
+    while True:
+        states = refresh(order_ids)
+        if all(s["status"] in TERMINAL for s in states):
+            return states
+        filled = tuple(s.get("filled_qty") or 0 for s in states)
+        if filled != last:
+            last, moved_at = filled, time.time()
+        now = time.time()
+        if now > hard:
+            return states
+        if now > deadline:
+            pending = any(s["status"] in ("pending_new", "accepted", "accepted_for_bidding") for s in states)
+            if not pending and now - moved_at > stall_seconds:
+                return states
+        time.sleep(2)
+
+
 LONG_ORDER_KINDS = {"market": TimeInForce.DAY, "limit": TimeInForce.DAY, "moc": TimeInForce.CLS,
                     "opg": TimeInForce.OPG}
 
@@ -244,12 +340,19 @@ def submit_long(ticker: str, qty: float, side: str, kind: str, limit_price: floa
     return order_dict(_send(req))
 
 
-def wait_no_open_orders(symbols: list[str], seconds: int = 10) -> bool:
-    """After a cancel: poll until no order on `symbols` is still open (a stop may fill instead)."""
+def submit_opg(ticker: str, qty: float, side: str, client_order_id: str | None = None) -> dict:
+    """Market-on-open order (round 3 opening-auction short entry). Alpaca accepts OPG orders
+    until 09:28 ET; a sell with no position is a short sale."""
+    return submit_long(ticker, qty, side, "opg", client_order_id=client_order_id)
+
+
+def wait_no_open_orders(symbols: list[str], seconds: int = 10, ignore=None) -> bool:
+    """After a cancel: poll until no order on `symbols` is still open (a stop may fill instead).
+    `ignore(order) -> True`: an order that was deliberately kept (a staged MOC) doesn't count."""
     deadline = time.time() + seconds
     while True:
-        open_orders = [o for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
-                       if o.symbol in set(symbols)]
+        open_orders = [o for o in client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
+                       if o.symbol in set(symbols) and not (ignore and ignore(o))]
         if not open_orders:
             return True
         if time.time() > deadline:
@@ -287,6 +390,7 @@ def order_dict(o) -> dict:
         "filled_avg_price": float(o.filled_avg_price) if o.filled_avg_price else None,
         "filled_at": o.filled_at.isoformat() if o.filled_at else None,
         "stop_price": float(o.stop_price) if getattr(o, "stop_price", None) else None,
+        **({"tif": _tif(o)} if _tif(o) not in ("", "day") else {}),   # cls / opg only: no new column on DAY rows
         **({"limit_price": float(o.limit_price)} if getattr(o, "limit_price", None) else {}),
     }
 

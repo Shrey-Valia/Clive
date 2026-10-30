@@ -8,16 +8,21 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 from pathlib import Path
 
 from . import config as C
+
+log = logging.getLogger("optionslive")
 
 POSITIONS = "positions.json"
 CONDORS = "condors.json"        # condor sleeve records (sleeve "condor"), kept apart from the dip spreads
 TRADES = "trades.jsonl"
 ORDERS = "orders.jsonl"
 GUARD = "last_execute.json"
+INFLIGHT = "inflight.json"      # write-ahead journal of orders a run is working (cleared when booked)
+RESTING = "resting.json"        # resting GTC orders (take-profit / overnight expiry exit) by spread id
 
 
 def _dir(d: Path | None) -> Path:
@@ -56,10 +61,54 @@ def append(name: str, rec: dict, d: Path | None = None) -> None:
 
 
 def read_jsonl(name: str, d: Path | None = None) -> list[dict]:
+    """Every parseable line. A host that dies mid-append leaves a truncated last line; it is
+    skipped (with a warning) instead of breaking every later reader (sync, entry recovery)."""
     f = _dir(d) / name
     if not f.exists():
         return []
-    return [json.loads(x) for x in f.read_text().splitlines() if x.strip()]
+    out = []
+    for i, x in enumerate(f.read_text().splitlines()):
+        if not x.strip():
+            continue
+        try:
+            out.append(json.loads(x))
+        except ValueError:
+            log.warning("%s line %d is not valid JSON (truncated write?); skipped",
+                                                     name, i + 1)
+    return out
+
+
+def _load_json(name: str, d: Path | None = None) -> dict:
+    f = _dir(d) / name
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text())
+    except ValueError:
+        log.error("%s is not valid JSON; treated as empty", f)
+        return {}
+
+
+def load_inflight(d: Path | None = None) -> dict:
+    return _load_json(INFLIGHT, d)
+
+
+def save_inflight(rec: dict, d: Path | None = None) -> None:
+    _atomic(_dir(d) / INFLIGHT, json.dumps(rec, indent=1, default=str, sort_keys=True))
+
+
+def clear_inflight(d: Path | None = None) -> None:
+    f = _dir(d) / INFLIGHT
+    if f.exists():
+        f.unlink()
+
+
+def load_resting(d: Path | None = None) -> dict:
+    return _load_json(RESTING, d)
+
+
+def save_resting(rec: dict, d: Path | None = None) -> None:
+    _atomic(_dir(d) / RESTING, json.dumps(rec, indent=1, default=str, sort_keys=True))
 
 
 def already_ran(today: dt.date, kind: str = "daily", d: Path | None = None) -> bool:
