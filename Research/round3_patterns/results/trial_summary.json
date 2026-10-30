@@ -1,0 +1,22 @@
+{
+ "n_trials": 168,
+ "var_daily_sr": 0.0015497873378055166,
+ "window": [
+  "2017-02-01",
+  "2026-10-20"
+ ],
+ "by_family": {
+  "F3_trend": 31,
+  "F5_noise_nbhd": 26,
+  "F1_calendar": 21,
+  "F4_losers": 18,
+  "F5_intraday": 18,
+  "F2_overnight": 16,
+  "F5_noise_xs": 10,
+  "F6_reversal": 8,
+  "F9_earnings": 8,
+  "F3_trend_nbhd": 5,
+  "F7_52wh": 4,
+  "F8_si": 3
+ }
+}
